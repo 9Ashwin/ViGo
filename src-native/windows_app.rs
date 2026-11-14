@@ -72,6 +72,7 @@ struct Hook {
     start: Option<Instant>,
     pending: Option<Key>,
     timer: usize,
+    session: u64,
     modifiers: std::collections::BTreeSet<u32>,
 }
 thread_local! {static HOOK:RefCell<Hook>=RefCell::new(Hook::default());static APP:RefCell<Option<App>>=const{RefCell::new(None)};}
@@ -128,6 +129,23 @@ unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     let mut swallow = false;
     HOOK.with(|cell| {
         let mut h = cell.borrow_mut();
+        let session = SESSION.load(Ordering::SeqCst);
+        if h.session != session {
+            h.gesture.reset();
+            h.pending = None;
+            h.start = None;
+            if h.timer != 0 {
+                let _ = KillTimer(None, h.timer);
+                h.timer = 0;
+            }
+            h.modifiers.clear();
+            for vk in [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0x5b, 0x5c] {
+                if GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 {
+                    h.modifiers.insert(vk);
+                }
+            }
+            h.session = session;
+        }
         // Track physical modifiers before replay; async OS state lags suppressed input.
         if [
             0x10, 0x11, 0x12, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0x5b, 0x5c,
@@ -226,7 +244,9 @@ unsafe extern "system" fn mouse(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
             send(Event::Move(p));
         }
         if w.0 as u32 == WM_RBUTTONDOWN {
-            let open = HOOK.with(|h| h.borrow().gesture.open);
+            let open = HOOK.with(|h| h.borrow().gesture.open)
+                && ENABLED.load(Ordering::Relaxed)
+                && !LOCKED.load(Ordering::Relaxed);
             if open {
                 HOOK.with(|h| h.borrow_mut().gesture.cancel());
                 send(Event::Cancel);

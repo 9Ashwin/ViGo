@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/../.."
-MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --release "$@"
+# Avoid rustc strip corrupting proc-macro LINKEDIT alignment on newer dyld (rust-lang/rust#157750).
+MACOSX_DEPLOYMENT_TARGET=13.0 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release "$@"
 sh native/system-helper/build.sh
 app="release/native/ViGo.app"
 version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys;print(json.load(sys.stdin)["packages"][0]["version"])')
@@ -9,6 +10,7 @@ build_version=$(printf '%s' "$version" | python3 -c 'import sys;a,b,c=map(int,sy
 icon_name="ViGo-$(shasum -a 256 build/icon.icns | cut -c1-12).icns"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/ViGo "$app/Contents/MacOS/ViGo"
+/usr/bin/strip -x "$app/Contents/MacOS/ViGo"
 cp native/system-helper/build/system-helper "$app/Contents/Resources/"
 cp assets/mascot-sheet.png build/trayTemplate.png build/trayTemplate@2x.png "$app/Contents/Resources/"
 rm -f "$app/Contents/Resources"/ViGo-*.icns "$app/Contents/Resources/icon.icns"
