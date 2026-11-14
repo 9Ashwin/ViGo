@@ -44,48 +44,12 @@ impl State {
             radius * 2.,
             radius * 2.,
         )));
-        NSColor::colorWithWhite_alpha(1., 0.5).setStroke();
-        border.setLineWidth(0.65);
+        NSColor::colorWithWhite_alpha(1., 0.38).setStroke();
+        border.setLineWidth(0.6);
         border.stroke();
-        for i in 0..self.active_paths.len() {
-            if self.hover_mix[i] < 0.005 {
-                continue;
-            }
-            let node = &self.ring.nodes[i];
-            let angle = node.angle;
-            let half = std::f64::consts::PI / node.count as f64;
-            let radius = node.radius + self.ring.icon / 2. + 12.;
-            let path = NSBezierPath::bezierPath();
-            for step in 0..=28 {
-                let a = angle - half + 2. * half * step as f64 / 28.;
-                let p = NSPoint::new(cx + a.cos() * radius, cy + a.sin() * radius);
-                if step == 0 {
-                    path.moveToPoint(p)
-                } else {
-                    path.lineToPoint(p)
-                }
-            }
-            let inner = (node.radius - self.ring.icon / 2. - 12.).max(self.ring.hub);
-            for step in (0..=28).rev() {
-                let a = angle - half + 2. * half * step as f64 / 28.;
-                path.lineToPoint(NSPoint::new(cx + a.cos() * inner, cy + a.sin() * inner));
-            }
-            path.closePath();
-            fill(
-                &path,
-                &NSColor::controlAccentColor().colorWithAlphaComponent(0.14 * self.hover_mix[i]),
-            );
-        }
-        let hub = self.ring.hub;
-        let path =
-            NSBezierPath::bezierPathWithOvalInRect(rect(r(cx - hub, cy - hub, hub * 2., hub * 2.)));
-        fill(
-            &path,
-            &NSColor::colorWithWhite_alpha(1., if self.selected.is_none() { 0.16 } else { 0.07 }),
-        );
-        NSColor::colorWithWhite_alpha(1., 0.45).setStroke();
-        path.setLineWidth(0.8);
-        path.stroke();
+        // Let the system glass and icon artwork carry the interface; selection has no colored tile.
+        let shadow = NSShadow::new();
+        let indicator = color("secondaryLabelColor").colorWithAlphaComponent(0.42);
         for i in 0..self.active_paths.len() {
             let path = self.path_at(i);
             if path.is_empty() {
@@ -100,34 +64,31 @@ impl State {
             };
             let (x, y) = (
                 cx + n.angle.cos() * n.radius * intro,
-                cy + n.angle.sin() * n.radius * intro - self.hover_mix[i] * 1.5,
+                cy + n.angle.sin() * n.radius * intro - self.hover_mix[i] * 3.5,
             );
-            let hot = self.hover_mix[i] > 0.01;
-            if hot {
-                round(
-                    r(
-                        x - self.ring.icon * 0.7,
-                        y - self.ring.icon * 0.7,
-                        self.ring.icon * 1.4,
-                        self.ring.icon * 1.4,
-                    ),
-                    self.ring.icon * 0.3,
-                    &NSColor::colorWithWhite_alpha(1., 0.18 * self.hover_mix[i]),
-                );
-            }
-            let side = self.ring.icon * (1. + 0.12 * self.hover_mix[i]);
+            let emphasis = self.hover_mix[i];
+            let side = self.ring.icon * (1. + 0.16 * emphasis);
             if let Some(icon) = self.icons.get(&path) {
+                NSGraphicsContext::saveGraphicsState_class();
+                shadow.setShadowOffset(NSSize::new(0., -1.5 - 2. * emphasis));
+                shadow.setShadowBlurRadius(3. + 7. * emphasis);
+                shadow.setShadowColor(Some(&NSColor::colorWithWhite_alpha(
+                    0.,
+                    0.13 + 0.09 * emphasis,
+                )));
+                shadow.set();
                 image(icon, r(x - side / 2., y - side / 2., side, side));
+                NSGraphicsContext::restoreGraphicsState_class();
             }
             if self.running.contains(&path) {
                 fill(
                     &NSBezierPath::bezierPathWithOvalInRect(rect(r(
-                        x - 2.,
-                        y + side / 2. + 3.,
-                        4.,
-                        4.,
+                        x - 1.5,
+                        y + side / 2. + 5.,
+                        3.,
+                        3.,
                     ))),
-                    &NSColor::controlAccentColor(),
+                    &indicator,
                 );
             }
         }
@@ -187,6 +148,11 @@ impl State {
             .selected
             .map(|i| self.title(&self.path_at(i)))
             .unwrap_or_else(|| "松开取消".into());
+        let caption_color = if self.selected.is_some() {
+            ink
+        } else {
+            color("secondaryLabelColor")
+        };
         center_text(
             &name,
             r(
@@ -196,8 +162,8 @@ impl State {
                 24.,
             ),
             self.settings.wheel_size_px * 0.025,
-            true,
-            &ink,
+            self.selected.is_some(),
+            &caption_color,
         );
     }
     pub(super) unsafe fn sync_glass(&mut self) {
@@ -208,6 +174,17 @@ impl State {
             radius * 2.,
             radius * 2.,
         )];
+        let appearances = NSArray::from_slice(&[
+            ns_string!("NSAppearanceNameAqua"),
+            ns_string!("NSAppearanceNameDarkAqua"),
+        ]);
+        let dark = self
+            .canvas
+            .effectiveAppearance()
+            .bestMatchFromAppearancesWithNames(&appearances)
+            .is_some_and(|name| name.isEqualToString(ns_string!("NSAppearanceNameDarkAqua")));
+        // Regular glass protects white text on bright wallpapers in dark appearance.
+        let style = if dark { 0isize } else { 1isize };
         let root = self.overlay.contentView().unwrap();
         while self.glasses.len() > frames.len() {
             self.glasses.pop().unwrap().removeFromSuperview();
@@ -215,7 +192,7 @@ impl State {
         while self.glasses.len() < frames.len() {
             let glass = if AnyClass::get(c"NSGlassEffectView").is_some() {
                 let v = native("NSGlassEffectView", r(0., 0., 16., 16.));
-                let _: () = msg_send![&*v,setStyle:1isize];
+                let _: () = msg_send![&*v,setStyle:style];
                 v
             } else {
                 let v = native("NSVisualEffectView", r(0., 0., 16., 16.));
@@ -229,7 +206,7 @@ impl State {
             self.glasses.push(glass);
         }
         let height = root.bounds().size.height;
-        for (i, (glass, frame)) in self.glasses.iter().zip(frames).enumerate() {
+        for (glass, frame) in self.glasses.iter().zip(frames) {
             if ![frame.x, frame.y, frame.w, frame.h]
                 .iter()
                 .all(|v| v.is_finite())
@@ -245,9 +222,8 @@ impl State {
                 NSPoint::new(frame.x, height - frame.y - frame.h),
                 NSSize::new(frame.w, frame.h),
             ));
-            let radius = if i == 0 { radius } else { 12. };
             if AnyClass::get(c"NSGlassEffectView").is_some() {
-                let _: () = msg_send![&**glass,setStyle:if i==0{1isize}else{0isize}];
+                let _: () = msg_send![&**glass,setStyle:style];
                 let _: () =
                     msg_send![&**glass,setCornerRadius:radius.min(frame.w.min(frame.h)/2.-0.25)];
             }

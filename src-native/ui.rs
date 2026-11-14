@@ -54,12 +54,6 @@ unsafe fn fill(path: &NSBezierPath, c: &NSColor) {
     c.setFill();
     path.fill();
 }
-unsafe fn round(frame: Rect, radius: f64, c: &NSColor) {
-    fill(
-        &NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(frame), radius, radius),
-        c,
-    );
-}
 unsafe fn image(img: &NSImage, frame: Rect) {
     img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
         rect(frame),
@@ -611,8 +605,10 @@ impl State {
                             v["x"].as_f64().unwrap_or(f.size.width / 2.),
                             v["y"].as_f64().unwrap_or(f.size.height / 2.),
                         );
-                        self.trial = Some(self.now() + 3.);
+                        self.trial =
+                            Some(self.now() + v["duration"].as_f64().unwrap_or(3.).clamp(1., 12.));
                     }
+                    "dismiss" => self.close_wheel(),
                     "screenshot" => {
                         let rect = v["rect"].as_str().unwrap_or("940,28,380,640");
                         let _ = std::process::Command::new("/usr/sbin/screencapture")
