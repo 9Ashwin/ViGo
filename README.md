@@ -4,6 +4,8 @@
 
 Rust + AppKit 原生 macOS 轮盘，直接跟随系统 Dock，不维护另一套软件列表。
 
+[下载最新 macOS 版本](https://github.com/9Ashwin/ViGo/releases/latest) · Apple Silicon（M 系列）
+
 <p align="center">
   <img src="docs/images/vigo-demo.gif" alt="ViGo：Dock 软件、原生玻璃轮盘与小猫反馈" width="520" />
 </p>
