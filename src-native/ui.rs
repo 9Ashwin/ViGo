@@ -6,6 +6,7 @@ use crate::{
     layout::{self, Rect},
     model::{Settings, Trigger},
     platform::{self, Message},
+    tether::{Frame as TetherFrame, Point, Target, Tether},
 };
 use objc2::{
     define_class, msg_send,
@@ -143,6 +144,8 @@ struct State {
     invocations: usize,
     armed: bool,
     hover_mix: Vec<f64>,
+    tether: Tether,
+    last_snap: Option<String>,
     capturing: bool,
     capture_dirty: bool,
     pending_key: platform::Ref,
@@ -420,6 +423,7 @@ pub fn run() {
         );
         let root = native("NSView", r(0., 0., 800., 800.));
         let canvas = Canvas::new(r(0., 0., 800., 800.));
+        canvas.setWantsLayer(true);
         root.addSubview(&canvas);
         overlay.setContentView(Some(&root));
         let status = NSStatusBar::systemStatusBar().statusItemWithLength(-1.);
@@ -497,6 +501,8 @@ pub fn run() {
             invocations: 0,
             armed: false,
             hover_mix: vec![],
+            tether: Tether::default(),
+            last_snap: None,
             capturing: false,
             capture_dirty: false,
             pending_key: ptr::null_mut(),
@@ -630,7 +636,7 @@ impl State {
                 }
             }
         }
-        let v = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"softwareOnly":true,"glassCount":self.glasses.len(),"notice":self.notice});
+        let v = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"softwareOnly":true,"glassCount":self.glasses.iter().filter(|view|!view.isHidden()).count(),"tetherTip":[self.tether.tip().x,self.tether.tip().y],"tetherAlpha":self.tether.alpha(),"tetherSnapped":self.tether.snapped,"emptyBackdrop":true,"notice":self.notice});
         let tmp = dir.join("state.tmp");
         let _ = std::fs::write(&tmp, serde_json::to_vec(&v).unwrap());
         let _ = std::fs::rename(tmp, dir.join("state.json"));

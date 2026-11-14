@@ -36,17 +36,10 @@ impl State {
     }
     pub(super) unsafe fn draw_wheel(&self) {
         let (cx, cy) = self.center;
-        let radius = self.ring.surface;
         let ink = color("labelColor");
-        let border = NSBezierPath::bezierPathWithOvalInRect(rect(r(
-            cx - radius,
-            cy - radius,
-            radius * 2.,
-            radius * 2.,
-        )));
-        NSColor::colorWithWhite_alpha(1., 0.38).setStroke();
-        border.setLineWidth(0.6);
-        border.stroke();
+        NSColor::clearColor().setFill();
+        NSRectFillUsingOperation(self.canvas.bounds(), NSCompositingOperation::Copy);
+        self.draw_tether();
         // Let the system glass and icon artwork carry the interface; selection has no colored tile.
         let shadow = NSShadow::new();
         let indicator = color("secondaryLabelColor").colorWithAlphaComponent(0.42);
@@ -55,19 +48,8 @@ impl State {
             if path.is_empty() {
                 continue;
             }
-            let n = &self.ring.nodes[i];
-            let t = ((self.now() - self.opened) / 0.18).clamp(0., 1.);
-            let intro = if self.reduce_motion {
-                1.
-            } else {
-                0.95 + 0.05 * (1. - (1. - t).powi(3))
-            };
-            let (x, y) = (
-                cx + n.angle.cos() * n.radius * intro,
-                cy + n.angle.sin() * n.radius * intro - self.hover_mix[i] * 3.5,
-            );
+            let (x, y, side) = self.node_pose(i);
             let emphasis = self.hover_mix[i];
-            let side = self.ring.icon * (1. + 0.16 * emphasis);
             if let Some(icon) = self.icons.get(&path) {
                 NSGraphicsContext::saveGraphicsState_class();
                 shadow.setShadowOffset(NSSize::new(0., -1.5 - 2. * emphasis));
@@ -95,7 +77,7 @@ impl State {
         let dx = self.pointer.0 - cx;
         let dy = self.pointer.1 - cy;
         let reduced = NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
-        let row = if self.selected.is_none() {
+        let row = if self.selected.is_none() && self.tether.alpha() < 0.2 {
             if self.now() - self.opened < 1. {
                 3
             } else {
@@ -144,90 +126,188 @@ impl State {
             row,
             frame,
         );
-        let name = self
-            .selected
-            .map(|i| self.title(&self.path_at(i)))
-            .unwrap_or_else(|| "松开取消".into());
-        let caption_color = if self.selected.is_some() {
-            ink
+        let (name, frame, selected) = if let Some(index) = self.selected.filter(|_| self.armed) {
+            let (x, y, side) = self.node_pose(index);
+            let size = self.canvas.bounds().size;
+            let width = 144f64.min(size.width - 16.);
+            (
+                self.title(&self.path_at(index)),
+                r(
+                    (x - width / 2.).clamp(8., size.width - width - 8.),
+                    (y + side / 2. + 10.).clamp(8., size.height - 26.),
+                    width,
+                    20.,
+                ),
+                true,
+            )
         } else {
-            color("secondaryLabelColor")
+            (
+                "松开取消".into(),
+                r(
+                    cx - 64.,
+                    cy + self.settings.wheel_size_px * 0.063,
+                    128.,
+                    22.,
+                ),
+                false,
+            )
         };
+        NSGraphicsContext::saveGraphicsState_class();
+        let shadow = NSShadow::new();
+        shadow.setShadowOffset(NSSize::new(0., -1.));
+        shadow.setShadowBlurRadius(3.);
+        shadow.setShadowColor(Some(&NSColor::colorWithWhite_alpha(
+            if self.dark_appearance() { 0. } else { 1. },
+            0.85,
+        )));
+        shadow.set();
         center_text(
             &name,
-            r(
-                cx - self.settings.wheel_size_px * 0.115,
-                cy + self.settings.wheel_size_px * 0.063,
-                self.settings.wheel_size_px * 0.23,
-                24.,
-            ),
+            frame,
             self.settings.wheel_size_px * 0.025,
-            self.selected.is_some(),
-            &caption_color,
+            selected,
+            &ink,
         );
+        NSGraphicsContext::restoreGraphicsState_class();
     }
-    pub(super) unsafe fn sync_glass(&mut self) {
-        let radius = self.ring.surface;
-        let frames = [r(
-            self.center.0 - radius,
-            self.center.1 - radius,
-            radius * 2.,
-            radius * 2.,
-        )];
-        let appearances = NSArray::from_slice(&[
+    pub(super) fn node_pose(&self, index: usize) -> (f64, f64, f64) {
+        let node = &self.ring.nodes[index];
+        let t = ((self.now() - self.opened) / 0.18).clamp(0., 1.);
+        let intro = if self.reduce_motion {
+            1.
+        } else {
+            0.95 + 0.05 * (1. - (1. - t).powi(3))
+        };
+        (
+            self.center.0 + node.angle.cos() * node.radius * intro,
+            self.center.1 + node.angle.sin() * node.radius * intro - self.hover_mix[index] * 3.5,
+            self.ring.icon * (1. + 0.16 * self.hover_mix[index]),
+        )
+    }
+    pub(super) unsafe fn dark_appearance(&self) -> bool {
+        let names = NSArray::from_slice(&[
             ns_string!("NSAppearanceNameAqua"),
             ns_string!("NSAppearanceNameDarkAqua"),
         ]);
-        let dark = self
-            .canvas
+        self.canvas
             .effectiveAppearance()
-            .bestMatchFromAppearancesWithNames(&appearances)
-            .is_some_and(|name| name.isEqualToString(ns_string!("NSAppearanceNameDarkAqua")));
-        // Regular glass protects white text on bright wallpapers in dark appearance.
-        let style = if dark { 0isize } else { 1isize };
-        let root = self.overlay.contentView().unwrap();
-        while self.glasses.len() > frames.len() {
-            self.glasses.pop().unwrap().removeFromSuperview();
+            .bestMatchFromAppearancesWithNames(&names)
+            .is_some_and(|name| name.isEqualToString(ns_string!("NSAppearanceNameDarkAqua")))
+    }
+    pub(super) unsafe fn draw_tether(&self) {
+        let alpha = self.tether.alpha();
+        if alpha < 0.006 {
+            return;
         }
-        while self.glasses.len() < frames.len() {
+        let origin = Point::new(
+            self.center.0,
+            self.center.1 - self.settings.wheel_size_px * 0.022,
+        );
+        let tip = self.tether.tip();
+        let length = origin.distance(tip);
+        if length < 22. {
+            return;
+        }
+        let (ux, uy) = ((tip.x - origin.x) / length, (tip.y - origin.y) / length);
+        let start = NSPoint::new(origin.x + ux * 16., origin.y + uy * 16.);
+        let control = NSPoint::new(
+            (start.x + tip.x) / 2. - uy * self.tether.bend(),
+            (start.y + tip.y) / 2. + ux * self.tether.bend(),
+        );
+        let path = NSBezierPath::bezierPath();
+        path.moveToPoint(start);
+        path.curveToPoint_controlPoint1_controlPoint2(
+            NSPoint::new(tip.x, tip.y),
+            NSPoint::new(
+                start.x + (control.x - start.x) * 2. / 3.,
+                start.y + (control.y - start.y) * 2. / 3.,
+            ),
+            NSPoint::new(
+                tip.x + (control.x - tip.x) * 2. / 3.,
+                tip.y + (control.y - tip.y) * 2. / 3.,
+            ),
+        );
+        path.setLineCapStyle(NSLineCapStyle::Round);
+        NSColor::colorWithWhite_alpha(1., 0.5 * alpha).setStroke();
+        path.setLineWidth(5.);
+        path.stroke();
+        let c = if self.dark_appearance() {
+            NSColor::colorWithSRGBRed_green_blue_alpha(0.86, 0.74, 0.59, 0.86 * alpha)
+        } else {
+            NSColor::colorWithSRGBRed_green_blue_alpha(0.60, 0.47, 0.32, 0.82 * alpha)
+        };
+        c.setStroke();
+        path.setLineWidth(2.8);
+        path.stroke();
+        if !self.tether.snapped {
+            fill(
+                &NSBezierPath::bezierPathWithOvalInRect(rect(r(
+                    tip.x - 2.4,
+                    tip.y - 2.4,
+                    4.8,
+                    4.8,
+                ))),
+                &c,
+            );
+        }
+    }
+    pub(super) unsafe fn sync_glass(&mut self) {
+        let selected = self
+            .selected
+            .filter(|_| self.active && self.armed && self.tether.snapped);
+        if selected.is_none() {
+            for view in &self.glasses {
+                view.setHidden(true);
+            }
+            return;
+        }
+        let index = selected.unwrap();
+        let (x, y, _) = self.node_pose(index);
+        let radius = self.ring.icon * 0.7;
+        let frame = r(x - radius, y - radius, radius * 2., radius * 2.);
+        let style = if self.dark_appearance() {
+            0isize
+        } else {
+            1isize
+        };
+        if self.glasses.is_empty() {
             let glass = if AnyClass::get(c"NSGlassEffectView").is_some() {
-                let v = native("NSGlassEffectView", r(0., 0., 16., 16.));
-                let _: () = msg_send![&*v,setStyle:style];
-                v
+                let view = native("NSGlassEffectView", frame);
+                let _: () = msg_send![&*view,setStyle:style];
+                view
             } else {
-                let v = native("NSVisualEffectView", r(0., 0., 16., 16.));
-                let _: () = msg_send![&*v,setMaterial:6usize];
-                let _: () = msg_send![&*v,setBlendingMode:0usize];
-                let _: () = msg_send![&*v,setState:1usize];
-                v
+                let view = native("NSVisualEffectView", frame);
+                let _: () = msg_send![&*view,setMaterial:6usize];
+                let _: () = msg_send![&*view,setBlendingMode:0usize];
+                let _: () = msg_send![&*view,setState:1usize];
+                view
             };
+            let root = self.overlay.contentView().unwrap();
             let _: () =
                 msg_send![&*root,addSubview:&*glass,positioned:-1isize,relativeTo:&*self.canvas];
             self.glasses.push(glass);
         }
-        let height = root.bounds().size.height;
-        for (glass, frame) in self.glasses.iter().zip(frames) {
-            if ![frame.x, frame.y, frame.w, frame.h]
-                .iter()
-                .all(|v| v.is_finite())
-                || frame.w < 1.
-                || frame.h < 1.
-            {
-                continue;
-            }
+        let height = self.overlay.contentView().unwrap().bounds().size.height;
+        let glass = &self.glasses[0];
+        let next = NSRect::new(
+            NSPoint::new(frame.x, height - frame.y - frame.h),
+            NSSize::new(frame.w, frame.h),
+        );
+        if glass.frame() != next {
             if AnyClass::get(c"NSGlassEffectView").is_some() {
                 let _: () = msg_send![&**glass,setCornerRadius:0.0f64];
             }
-            glass.setFrame(NSRect::new(
-                NSPoint::new(frame.x, height - frame.y - frame.h),
-                NSSize::new(frame.w, frame.h),
-            ));
-            if AnyClass::get(c"NSGlassEffectView").is_some() {
-                let _: () = msg_send![&**glass,setStyle:style];
-                let _: () =
-                    msg_send![&**glass,setCornerRadius:radius.min(frame.w.min(frame.h)/2.-0.25)];
-            }
+            glass.setFrame(next);
         }
+        if AnyClass::get(c"NSGlassEffectView").is_some() {
+            let old: isize = msg_send![&**glass, style];
+            if old != style {
+                let _: () = msg_send![&**glass,setStyle:style];
+            }
+            let _: () = msg_send![&**glass,setCornerRadius:radius-0.25];
+        }
+        glass.setAlphaValue(self.hover_mix[index]);
+        glass.setHidden(false);
     }
     pub(super) unsafe fn open_wheel(&mut self, x: f64, y: f64) {
         if let Some((window, _)) = self.toast.take() {
@@ -274,6 +354,14 @@ impl State {
         self.closing = None;
         self.opened = self.now();
         self.selected = None;
+        self.last_snap = None;
+        self.tether.reset(
+            Point::new(
+                self.center.0,
+                self.center.1 - self.settings.wheel_size_px * 0.022,
+            ),
+            self.now(),
+        );
         self.overlay.setAlphaValue(0.);
         self.sync_glass();
         self.canvas.setNeedsDisplay(true);
@@ -559,6 +647,58 @@ impl State {
             }
             if self.trial.is_some_and(|d| now >= d) {
                 self.close_wheel();
+            }
+        }
+        if self.active || self.closing.is_some() {
+            let size = self.canvas.bounds().size;
+            let target = self
+                .selected
+                .filter(|_| self.armed && self.active)
+                .map(|i| {
+                    let (x, y, side) = self.node_pose(i);
+                    Target {
+                        center: Point::new(x, y),
+                        half_icon: side / 2.,
+                    }
+                });
+            let origin = Point::new(
+                self.center.0,
+                self.center.1 - self.settings.wheel_size_px * 0.022,
+            );
+            let enabled = self.active
+                && (self.pointer.0 - self.anchor.0).hypot(self.pointer.1 - self.anchor.1) >= 12.;
+            let changed = self.tether.advance(TetherFrame {
+                now,
+                origin,
+                pointer: Point::new(
+                    self.pointer.0.clamp(8., size.width - 8.),
+                    self.pointer.1.clamp(8., size.height - 8.),
+                ),
+                target,
+                max_length: self.ring.outer + 35.,
+                enabled,
+                reduced: self.reduce_motion,
+            });
+            if changed {
+                self.canvas.setNeedsDisplay(true);
+            }
+            self.sync_glass();
+            if self.active && self.tether.snapped {
+                if let Some(index) = self.selected {
+                    let key = self.path_at(index);
+                    if self.last_snap.as_ref() != Some(&key) {
+                        self.last_snap = Some(key);
+                        if !self.reduce_motion {
+                            NSHapticFeedbackManager::defaultPerformer()
+                                .performFeedbackPattern_performanceTime(
+                                    NSHapticFeedbackPattern::Alignment,
+                                    NSHapticFeedbackPerformanceTime::DrawCompleted,
+                                );
+                        }
+                    }
+                }
+            } else if !enabled {
+                self.last_snap = None;
             }
         }
         if let Some(start) = self.closing {

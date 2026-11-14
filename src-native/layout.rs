@@ -20,7 +20,6 @@ pub struct DockLayout {
     pub icon: f64,
     pub hub: f64,
     pub outer: f64,
-    pub surface: f64,
 }
 impl DockLayout {
     pub fn new(count: usize, base: f64, width: f64, height: f64) -> Self {
@@ -32,10 +31,9 @@ impl DockLayout {
                 icon: preferred,
                 hub,
                 outer: hub + 50.,
-                surface: hub + 50.,
             };
         }
-        // The main glass disc stays compact. Only the first eight Dock items live inside it.
+        // Keep the first eight apps in a compact orbit; overflow belongs outside it.
         let surface = (base * 188. / 600.)
             .min(width.min(height) / 2. - 20.)
             .max(hub + 50.);
@@ -54,7 +52,7 @@ impl DockLayout {
             radius += preferred + 18.;
         }
         if remaining > 0 {
-            // Dense Docks keep every item visible by fitting overflow rings, never enlarging the glass.
+            // Dense Docks keep every item visible by fitting overflow rings, never enlarging the inner orbit.
             rings.truncate(1);
             let available = (maximum - surface).max(20.);
             let overflow = count - inner_count;
@@ -99,7 +97,6 @@ impl DockLayout {
             icon,
             hub,
             outer,
-            surface,
         }
     }
     pub fn hit(&self, x: f64, y: f64, previous: Option<usize>) -> Option<usize> {
