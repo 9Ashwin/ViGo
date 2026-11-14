@@ -19,13 +19,13 @@ pub struct Detail {
 }
 pub enum Request {
     Activate(String, u64),
-    Details(String),
+    Details(String, u64),
     Select(Detail, u64),
     Stop,
 }
 pub enum Update {
     Items(Vec<Item>),
-    Details(String, Vec<Detail>),
+    Details(String, u64, Vec<Detail>),
     Error(String),
 }
 fn path(key: &str) -> String {
@@ -180,7 +180,7 @@ pub(super) fn start() -> (
                         let _ = publish(&out, Update::Error("任务栏项目已移除，请重新选择".into()));
                     }
                 }
-                Ok(Request::Details(key)) => {
+                Ok(Request::Details(key, generation)) => {
                     let p = path(&key);
                     let mut details = windows_for(&p);
                     let windows = details.clone();
@@ -222,7 +222,7 @@ pub(super) fn start() -> (
                         let min = serial.saturating_sub(512);
                         tabs.retain(|id, _| *id >= min);
                     }
-                    let _ = publish(&out, Update::Details(key, details));
+                    let _ = publish(&out, Update::Details(key, generation, details));
                 }
                 Ok(Request::Select(d, epoch)) => {
                     if !session_valid(epoch) {

@@ -73,6 +73,7 @@ struct Hook {
     pending: Option<Key>,
     timer: usize,
     session: u64,
+    physical_v: bool,
     modifiers: std::collections::BTreeSet<u32>,
 }
 thread_local! {static HOOK:RefCell<Hook>=RefCell::new(Hook::default());static APP:RefCell<Option<App>>=const{RefCell::new(None)};}
@@ -115,7 +116,18 @@ unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     }
     let raw = &*(l.0 as *const KBDLLHOOKSTRUCT);
     if raw.dwExtraInfo == REPLAY {
-        let _ = REPLAY_COUNT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        let mut count = REPLAY_COUNT.load(Ordering::SeqCst);
+        while count > 0 {
+            match REPLAY_COUNT.compare_exchange_weak(
+                count,
+                count - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(current) => count = current,
+            }
+        }
         return CallNextHookEx(None, code, w, l);
     }
     let down = w.0 as u32 == WM_KEYDOWN || w.0 as u32 == WM_SYSKEYDOWN;
@@ -146,6 +158,15 @@ unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
             }
             h.session = session;
         }
+        let first_v_down = raw.vkCode == 86 && down && !h.physical_v;
+        if raw.vkCode == 86 {
+            if down {
+                h.physical_v = true;
+            }
+            if up {
+                h.physical_v = false;
+            }
+        }
         // Track physical modifiers before replay; async OS state lags suppressed input.
         if [
             0x10, 0x11, 0x12, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0x5b, 0x5c,
@@ -172,7 +193,7 @@ unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         }
         if raw.vkCode == 86 {
             if down {
-                if h.gesture.held || (h.modifiers.is_empty() && replay_allowed()) {
+                if h.gesture.held || (first_v_down && h.modifiers.is_empty() && replay_allowed()) {
                     if !h.gesture.held {
                         h.start = Some(Instant::now());
                         h.pending = Some(key.clone());
@@ -312,6 +333,7 @@ fn hooks() {
         let instance = GetModuleHandleW(None).unwrap_or_default();
         HOOK.with(|h| {
             let mut h = h.borrow_mut();
+            h.physical_v = GetAsyncKeyState(86) as u16 & 0x8000 != 0;
             for vk in [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0x5b, 0x5c] {
                 if GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 {
                     h.modifiers.insert(vk);
@@ -373,6 +395,7 @@ struct App {
     details: Vec<taskbar::Detail>,
     chips: Vec<layout::Rect>,
     selected_detail: Option<usize>,
+    detail_generation: u64,
     layout: DockLayout,
     anchor: (f64, f64),
     center: (f64, f64),
@@ -424,6 +447,7 @@ impl App {
         self.details.clear();
         self.chips.clear();
         self.selected_detail = None;
+        self.detail_generation += 1;
         self.draw();
         SetTimer(self.hwnd, 1, 33, None);
         let _ = SetWindowPos(
@@ -442,6 +466,7 @@ impl App {
         let _ = KillTimer(self.hwnd, 1);
         self.selected = None;
         self.selected_detail = None;
+        self.detail_generation += 1;
         let _ = ShowWindow(self.hwnd, SW_HIDE);
         self.surface.take();
     }
@@ -459,6 +484,7 @@ impl App {
         if (x - self.anchor.0).hypot(y - self.anchor.1) < 12. || dx.hypot(dy) < self.layout.hub {
             self.selected = None;
             self.selected_detail = None;
+            self.detail_generation += 1;
             self.details.clear();
             self.chips.clear();
             self.draw();
@@ -479,14 +505,16 @@ impl App {
         }
         let next = self.layout.hit(dx, dy, self.selected);
         if next != self.selected {
+            self.detail_generation += 1;
             self.selected = next;
             self.details.clear();
             self.chips.clear();
             if let Some(i) = next {
                 if let Some(item) = self.active_items.get(i) {
-                    let _ = self
-                        .requests
-                        .send(taskbar::Request::Details(item.key.clone()));
+                    let _ = self.requests.send(taskbar::Request::Details(
+                        item.key.clone(),
+                        self.detail_generation,
+                    ));
                 }
             }
         }
@@ -543,6 +571,7 @@ impl App {
                         self.details.clear();
                         self.chips.clear();
                         self.selected_detail = None;
+                        self.detail_generation += 1;
                         let dimensions = self
                             .surface
                             .as_ref()
@@ -561,9 +590,18 @@ impl App {
                         );
                     }
                     self.items = items;
+                    if self.active {
+                        if let Some(item) = self.selected.and_then(|i| self.active_items.get(i)) {
+                            let _ = self.requests.send(taskbar::Request::Details(
+                                item.key.clone(),
+                                self.detail_generation,
+                            ));
+                        }
+                    }
                 }
-                taskbar::Update::Details(key, details) => {
+                taskbar::Update::Details(key, generation, details) => {
                     if self.active
+                        && generation == self.detail_generation
                         && self
                             .selected
                             .and_then(|i| self.active_items.get(i))
@@ -727,6 +765,11 @@ impl App {
                 );
             }
             4 => {
+                // WM_DESTROY is synchronous while menu owns APP's mutable borrow.
+                // Clean up here; the reentrant window callback cannot borrow APP again.
+                self.close();
+                let _ = self.requests.send(taskbar::Request::Stop);
+                let _ = Shell_NotifyIconW(NIM_DELETE, &self.tray);
                 let _ = DestroyWindow(self.hwnd);
             }
             _ => {}
@@ -775,6 +818,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
 pub fn run() {
     unsafe {
         let smoke = std::env::args().any(|a| a == "--smoke-test");
+        // A second hook instance would replay taps twice. The kernel owns this handle until exit.
+        let _instance_guard = CreateMutexW(None, false, w!("Local\\ViGo.Native.Wheel"));
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            return;
+        }
+        let _instance_guard = _instance_guard.expect("single instance mutex");
         let _ = windows::Win32::System::Com::CoInitializeEx(
             None,
             windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
@@ -840,6 +889,7 @@ pub fn run() {
             details: vec![],
             chips: vec![],
             selected_detail: None,
+            detail_generation: 0,
             layout: DockLayout::new(0, 520., 1920., 1080.),
             anchor: (0., 0.),
             center: (0., 0.),
@@ -875,7 +925,14 @@ pub fn run() {
             let pixels = app
                 .surface
                 .as_mut()
-                .map(|s| s.buffer().chunks_exact(4).filter(|p| p[3] != 0).count())
+                .map(|s| {
+                    s.buffer()
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .filter(|p| p[3] != 0)
+                        .count()
+                })
                 .unwrap_or(0);
             let presented = app.presented;
             app.close();
