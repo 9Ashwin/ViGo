@@ -1,5 +1,5 @@
 //! macOS event boundary and bounded, isolated system services. No AppKit calls on workers.
-use crate::model::{DockItem, Tab, Window};
+use crate::model::DockItem;
 use objc2_foundation::NSPoint;
 use std::{
     ffi::c_void,
@@ -139,16 +139,7 @@ pub fn run(args: &[String], timeout: Duration) -> Result<serde_json::Value, Stri
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 pub enum Message {
-    Dock {
-        items: Vec<DockItem>,
-        exact: bool,
-    },
-    Snapshot {
-        windows: Vec<Window>,
-        tabs: Vec<Tab>,
-        running: Vec<String>,
-        paths: Vec<String>,
-    },
+    Dock { items: Vec<DockItem>, exact: bool },
     DockFailed,
     Failure(String),
 }
@@ -167,23 +158,6 @@ pub fn dock(tx: Sender<Message>) {
             }
         },
     );
-}
-pub fn snapshot(paths: Vec<String>, tx: Sender<Message>) {
-    std::thread::spawn(move || {
-        let args = |cmd: &str| {
-            let mut a = vec![cmd.into()];
-            a.extend(paths.iter().filter(|p| p.ends_with(".app")).cloned());
-            a
-        };
-        let value = run(&args("list"), Duration::from_millis(3500)).unwrap_or_default();
-        let tabs = run(&args("tabs"), Duration::from_millis(2200)).unwrap_or_default();
-        let _ = tx.send(Message::Snapshot {
-            paths,
-            windows: serde_json::from_value(value["windows"].clone()).unwrap_or_default(),
-            tabs: serde_json::from_value(tabs["tabs"].clone()).unwrap_or_default(),
-            running: serde_json::from_value(value["running"].clone()).unwrap_or_default(),
-        });
-    });
 }
 pub fn activate(command: &str, item: String, tx: Sender<Message>) {
     let command = command.to_string();

@@ -1,10 +1,10 @@
-//! All AppKit state stays on the main thread; Dock and window queries run in isolated workers.
+//! All AppKit state stays on the main thread; Dock queries run in isolated workers.
 mod menu;
 mod wheel;
 use crate::{
     input::{self, Effect, Gesture},
     layout::{self, Rect},
-    model::{Content, Settings, Tab, Trigger, Window},
+    model::{Settings, Trigger},
     platform::{self, Message},
 };
 use objc2::{
@@ -59,21 +59,6 @@ unsafe fn round(frame: Rect, radius: f64, c: &NSColor) {
         &NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(frame), radius, radius),
         c,
     );
-}
-unsafe fn text(value: &str, frame: Rect, size: f64, bold: bool, c: &NSColor) {
-    let font = NSFont::systemFontOfSize_weight(size, if bold { 0.45 } else { 0. });
-    let para = NSMutableParagraphStyle::new();
-    para.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-    let attrs = NSDictionary::<NSString, AnyObject>::from_slices(
-        &[
-            ns_string!("NSFont"),
-            ns_string!("NSColor"),
-            ns_string!("NSParagraphStyle"),
-        ],
-        &[&*font, &**c, &*para],
-    );
-    let s = NSString::from_str(value);
-    let _: () = msg_send![&*s,drawInRect:rect(frame),withAttributes:&*attrs];
 }
 unsafe fn image(img: &NSImage, frame: Rect) {
     img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
@@ -142,8 +127,6 @@ struct State {
     primary_height: f64,
     icons: HashMap<String, Retained<NSImage>>,
     sheet: Retained<NSImage>,
-    windows: Vec<Window>,
-    tabs: Vec<Tab>,
     running: Vec<String>,
     tx: Sender<Message>,
     rx: Receiver<Message>,
@@ -156,17 +139,11 @@ struct State {
     center: (f64, f64),
     pointer: (f64, f64),
     selected: Option<usize>,
-    entries: Vec<Content>,
-    chips: Vec<Rect>,
-    selected_chip: Option<usize>,
     ring: layout::DockLayout,
     anchor: (f64, f64),
-    render_size: f64,
     opened: f64,
     closing: Option<f64>,
     trial: Option<f64>,
-    scan_pending: bool,
-    last_scan: f64,
     last_frame: usize,
     last_motion: f64,
     invocations: usize,
@@ -504,8 +481,6 @@ pub fn run() {
             primary_height: 0.,
             icons: HashMap::new(),
             sheet,
-            windows: vec![],
-            tabs: vec![],
             running: vec![],
             tx,
             rx,
@@ -518,17 +493,11 @@ pub fn run() {
             center: (0., 0.),
             pointer: (0., 0.),
             selected: None,
-            entries: vec![],
-            chips: vec![],
-            selected_chip: None,
             ring: layout::DockLayout::new(0, 520., 1470., 956.),
             anchor: (0., 0.),
-            render_size: 520.,
             opened: 0.,
             closing: None,
             trial: None,
-            scan_pending: false,
-            last_scan: 0.,
             last_frame: 0,
             last_motion: 0.,
             invocations: 0,
@@ -665,7 +634,7 @@ impl State {
                 }
             }
         }
-        let v = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"selectedChip":self.selected_chip,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"chips":self.chips.iter().map(|c|[c.x,c.y,c.w,c.h]).collect::<Vec<_>>(),"entries":self.entries.iter().map(|e|match e{Content::Window(w)=>&w.id,Content::Tab(t)=>&t.id}).collect::<Vec<_>>(),"notice":self.notice});
+        let v = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"softwareOnly":true,"glassCount":self.glasses.len(),"notice":self.notice});
         let tmp = dir.join("state.tmp");
         let _ = std::fs::write(&tmp, serde_json::to_vec(&v).unwrap());
         let _ = std::fs::rename(tmp, dir.join("state.json"));

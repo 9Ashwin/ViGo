@@ -181,7 +181,6 @@ const KEYS: &[(u16, u16)] = &[
 pub fn vk_to_mac(vk: u16) -> Option<u16> {
     KEYS.iter().find(|(v, _)| *v == vk).map(|(_, c)| *c)
 }
-#[cfg(any(target_os = "macos", test))]
 pub fn mac_to_vk(code: u16) -> Option<u16> {
     KEYS.iter().find(|(_, c)| *c == code).map(|(v, _)| *v)
 }
@@ -189,7 +188,6 @@ pub fn safe_trigger(vk: u16) -> bool {
     vk_to_mac(vk).is_some()
         && !matches!(vk,0x08|0x09|0x0d|0x10..=0x14|0x1b|0x20|0x25..=0x28|0x5b..=0x5c|0xa0..=0xa5)
 }
-#[cfg(target_os = "macos")]
 pub fn key_label(vk: u16) -> String {
     match vk {
         65..=90 | 48..=57 => (vk as u8 as char).to_string(),

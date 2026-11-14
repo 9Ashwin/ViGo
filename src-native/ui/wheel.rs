@@ -38,7 +38,6 @@ impl State {
         let (cx, cy) = self.center;
         let radius = self.ring.surface;
         let ink = color("labelColor");
-        let secondary = color("secondaryLabelColor");
         let border = NSBezierPath::bezierPathWithOvalInRect(rect(r(
             cx - radius,
             cy - radius,
@@ -200,75 +199,15 @@ impl State {
             true,
             &ink,
         );
-        center_text(
-            "◦   ESC",
-            r(cx - 25., cy + self.settings.wheel_size_px * 0.115, 75., 19.),
-            10.,
-            false,
-            &secondary,
-        );
-        for (i, (entry, chip)) in self.entries.iter().zip(&self.chips).enumerate() {
-            if self.selected_chip == Some(i) {
-                round(
-                    *chip,
-                    9.,
-                    &NSColor::colorWithSRGBRed_green_blue_alpha(0.2, 0.55, 0.9, 0.18),
-                );
-            }
-            let glyph = match entry {
-                Content::Tab(t) => {
-                    if t.selected {
-                        "●"
-                    } else {
-                        "○"
-                    }
-                }
-                Content::Window(_) => "▣",
-            };
-            let key = match entry {
-                Content::Tab(t) => t.app_path.clone(),
-                Content::Window(w) => w.app_path.clone(),
-            };
-            if let Some(icon) = self.icons.get(&key) {
-                image(icon, r(chip.x + 8., chip.y + 7., 20., 20.));
-            } else {
-                text(
-                    glyph,
-                    r(chip.x + 9., chip.y + 7., 18., 22.),
-                    13.,
-                    false,
-                    &NSColor::controlAccentColor(),
-                );
-            }
-            text(
-                entry.title(),
-                r(chip.x + 32., chip.y + 8., chip.w - 40., 21.),
-                11.,
-                false,
-                &ink,
-            );
-        }
     }
     pub(super) unsafe fn sync_glass(&mut self) {
         let radius = self.ring.surface;
-        let mut frames = vec![r(
+        let frames = [r(
             self.center.0 - radius,
             self.center.1 - radius,
             radius * 2.,
             radius * 2.,
         )];
-        let mut columns: Vec<Rect> = vec![];
-        for chip in &self.chips {
-            if let Some(group) = columns
-                .iter_mut()
-                .find(|g| (g.x - (chip.x - 6.)).abs() < 1.)
-            {
-                group.h = group.h.max(chip.y + chip.h + 6. - group.y);
-            } else {
-                columns.push(r(chip.x - 6., chip.y - 6., chip.w + 12., chip.h + 12.));
-            }
-        }
-        frames.extend(columns);
         let root = self.overlay.contentView().unwrap();
         while self.glasses.len() > frames.len() {
             self.glasses.pop().unwrap().removeFromSuperview();
@@ -349,7 +288,6 @@ impl State {
             f.size.width,
             f.size.height,
         );
-        self.render_size = self.ring.outer * 600. / 188.;
         self.center = self.ring.center(self.anchor, f.size.width, f.size.height);
         self.pointer = self.anchor;
         self.invocations += 1;
@@ -360,15 +298,12 @@ impl State {
         self.closing = None;
         self.opened = self.now();
         self.selected = None;
-        self.entries.clear();
-        self.chips.clear();
-        self.selected_chip = None;
         self.overlay.setAlphaValue(0.);
         self.sync_glass();
         self.canvas.setNeedsDisplay(true);
         self.overlay.orderFrontRegardless();
         self.start_animation();
-        self.scan();
+        self.refresh_running();
     }
     pub(super) unsafe fn close_wheel(&mut self) {
         self.active = false;
@@ -392,44 +327,16 @@ impl State {
             self.anim_timer = Some(t);
         }
     }
-    pub(super) fn scan(&mut self) {
-        if !self.scan_pending && !self.locked {
-            self.scan_pending = true;
-            self.last_scan = self.now();
-            platform::snapshot(self.settings.wheel.clone(), self.tx.clone());
-        }
-    }
-    pub(super) unsafe fn owner_changed(&mut self) {
-        let path = self.selected.map(|i| self.path_at(i)).unwrap_or_default();
-        self.entries = self
-            .tabs
+    pub(super) unsafe fn refresh_running(&mut self) {
+        self.running = NSWorkspace::sharedWorkspace()
+            .runningApplications()
             .iter()
-            .filter(|t| t.app_path == path)
-            .cloned()
-            .map(Content::Tab)
-            .chain(
-                self.windows
-                    .iter()
-                    .filter(|w| w.app_path == path)
-                    .cloned()
-                    .map(Content::Window),
-            )
+            .filter_map(|app| {
+                app.bundleURL()
+                    .and_then(|url| url.path())
+                    .map(|path| path.to_string())
+            })
             .collect();
-        self.selected_chip = None;
-        let size = self.canvas.bounds().size;
-        self.chips = layout::content(
-            self.center.0,
-            self.center.1,
-            self.render_size,
-            self.entries.len(),
-            size.width,
-            size.height,
-            self.selected
-                .map(|i| self.ring.nodes[i].angle.cos() >= 0.)
-                .unwrap_or(true),
-        );
-        self.sync_glass();
-        self.canvas.setNeedsDisplay(true);
     }
     pub(super) unsafe fn move_pointer(&mut self) {
         if !self.active {
@@ -441,28 +348,9 @@ impl State {
         let dy = y - self.center.1;
         if (x - self.anchor.0).hypot(y - self.anchor.1) < 12. {
             self.armed = false;
-            if self.selected.take().is_some() {
-                self.owner_changed();
-            }
+            self.selected = None;
             self.canvas.setNeedsDisplay(true);
             return;
-        }
-        let chip = if dx.hypot(dy) < self.ring.hub {
-            None
-        } else {
-            self.chips.iter().position(|c| c.has(x, y))
-        };
-        if let Some(i) = chip {
-            self.armed = true;
-            if self.selected_chip != Some(i) {
-                self.selected_chip = Some(i);
-
-                self.canvas.setNeedsDisplay(true);
-            }
-            return;
-        }
-        if self.selected_chip.take().is_some() {
-            self.canvas.setNeedsDisplay(true);
         }
         if self.selected.is_some() && dx.hypot(dy) > self.ring.outer - 4. {
             self.armed = dx.hypot(dy) <= self.ring.outer + 70.;
@@ -474,63 +362,19 @@ impl State {
             self.ring.hit(dx, dy, self.selected)
         };
         self.armed = next.is_some();
-        if next != self.selected {
-            self.selected = next;
-            self.owner_changed();
-        }
+        self.selected = next;
         self.canvas.setNeedsDisplay(true);
     }
     pub(super) unsafe fn execute_selection(&mut self) {
         if self.locked || !self.armed {
             return;
         }
-        if let Some(i) = self.selected_chip {
-            if let Some(item) = self.entries.get(i).cloned() {
-                match item {
-                    Content::Window(w) => platform::activate(
-                        "activate",
-                        serde_json::to_string(&w).unwrap(),
-                        self.tx.clone(),
-                    ),
-                    Content::Tab(t) => platform::activate(
-                        "activate-tab",
-                        serde_json::to_string(&t).unwrap(),
-                        self.tx.clone(),
-                    ),
-                }
-                return;
-            }
-        }
         if let Some(i) = self.selected {
-            let path = self.path_at(i);
-            if let Some(window) = self
-                .windows
-                .iter()
-                .find(|w| w.app_path == path && !w.minimized)
-                .or_else(|| self.windows.iter().find(|w| w.app_path == path))
-            {
-                platform::activate(
-                    "activate",
-                    serde_json::to_string(window).unwrap(),
-                    self.tx.clone(),
-                );
-            } else {
-                self.open_target(&path);
-            }
+            self.open_target(&self.path_at(i));
         }
     }
     pub(super) fn open_target(&self, target: &str) {
-        let target = target.to_string();
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let mut c = std::process::Command::new("/usr/bin/open");
-            if target.ends_with(".app") {
-                c.arg("-a");
-            }
-            if !c.arg(&target).status().is_ok_and(|s| s.success()) {
-                let _ = tx.send(Message::Failure("Dock 项目暂时无法打开，请重新同步".into()));
-            }
-        });
+        platform::activate("activate-app", target.to_string(), self.tx.clone());
     }
     pub(super) unsafe fn tick(&mut self) {
         #[cfg(feature = "diagnostics")]
@@ -597,12 +441,9 @@ impl State {
                     }
                     self.dock_exact = exact;
                     self.last_dock = now;
+                    self.refresh_running();
                     let previous_paths = self.active_paths.clone();
                     let previous_slot = self.selected;
-                    let previous_content = self
-                        .selected_chip
-                        .and_then(|i| self.entries.get(i))
-                        .cloned();
                     let names = items
                         .iter()
                         .map(|i| (i.path.clone(), i.name.clone()))
@@ -626,52 +467,26 @@ impl State {
                                 view.width,
                                 view.height,
                             );
-                            self.render_size = self.ring.outer * 600. / 188.;
                             self.center = self.ring.center(self.anchor, view.width, view.height);
                             self.hover_mix.resize(self.active_paths.len(), 0.);
                             self.selected = slot;
                             if slot.is_none() {
                                 self.armed = false;
                             }
-                            self.owner_changed();
-                            if let Some(previous) = previous_content {
-                                self.selected_chip =
-                                    crate::model::match_content(&previous, &self.entries);
-                                if self.selected_chip.is_none() {
-                                    self.armed = false;
-                                }
-                            }
+                            self.sync_glass();
+                            self.canvas.setNeedsDisplay(true);
                         }
                         self.icons.retain(|p, _| {
                             self.settings.wheel.contains(p)
                                 || (self.active && self.active_paths.contains(p))
                         });
                         self.load_icons();
-                        self.scan();
                     } else {
                         self.settings.names = names;
                         if self.active {
                             self.active_names = self.settings.names.clone();
                             self.canvas.setNeedsDisplay(true);
                         }
-                    }
-                }
-                Message::Snapshot {
-                    windows,
-                    tabs,
-                    running,
-                    paths,
-                } => {
-                    self.scan_pending = false;
-                    if paths != self.settings.wheel {
-                        self.scan();
-                        continue;
-                    }
-                    self.windows = windows;
-                    self.tabs = tabs;
-                    self.running = running;
-                    if self.active && self.selected_chip.is_none() {
-                        self.owner_changed();
                     }
                 }
                 Message::DockFailed => {
@@ -761,9 +576,6 @@ impl State {
             } else {
                 1. - (1. - t).powi(3)
             });
-            if now - self.last_scan > 4. {
-                self.scan();
-            }
             let frame = (now * 6.) as usize;
             if frame != self.last_frame {
                 self.last_frame = frame;

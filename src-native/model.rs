@@ -60,7 +60,6 @@ impl Settings {
             Trigger::Mouse(n) => n == "mouse4" || n == "mouse5",
         }
     }
-    #[cfg(target_os = "macos")]
     pub fn name(&self, path: &str) -> String {
         self.names.get(path).cloned().unwrap_or_else(|| {
             PathBuf::from(path)
@@ -71,10 +70,6 @@ impl Settings {
         })
     }
     pub fn path() -> PathBuf {
-        #[cfg(target_os = "windows")]
-        let root =
-            PathBuf::from(std::env::var_os("APPDATA").unwrap_or_else(|| ".".into())).join("ViGo");
-        #[cfg(not(target_os = "windows"))]
         let root = PathBuf::from(std::env::var_os("HOME").unwrap())
             .join("Library/Application Support/ViGo");
         root.join("settings.json")
@@ -106,91 +101,12 @@ impl Settings {
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[cfg(any(target_os = "macos", test))]
 pub struct DockItem {
     pub path: String,
     pub name: String,
     #[serde(default)]
     pub kind: String,
 }
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "camelCase")]
-#[cfg(any(target_os = "macos", test))]
-pub struct Window {
-    pub id: String,
-    pub app_path: String,
-    pub pid: i32,
-    pub window_id: u32,
-    pub index: i32,
-    pub title: String,
-    pub raw_title: String,
-    pub minimized: bool,
-    pub bounds: Vec<f64>,
-}
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "camelCase")]
-#[cfg(any(target_os = "macos", test))]
-pub struct Tab {
-    pub id: String,
-    pub app_path: String,
-    pub pid: i32,
-    pub window_id: u32,
-    pub index: usize,
-    pub identifier: String,
-    pub title: String,
-    pub selected: bool,
-}
-#[derive(Clone, Debug)]
-#[cfg(any(target_os = "macos", test))]
-pub enum Content {
-    Tab(Tab),
-    Window(Window),
-}
-#[cfg(any(target_os = "macos", test))]
-impl Content {
-    pub fn title(&self) -> &str {
-        match self {
-            Self::Tab(t) => &t.title,
-            Self::Window(w) => &w.title,
-        }
-    }
-}
-
-#[cfg(any(target_os = "macos", test))]
-pub fn match_content(previous: &Content, entries: &[Content]) -> Option<usize> {
-    let candidates: Vec<usize> = entries
-        .iter()
-        .enumerate()
-        .filter(|(_, next)| match (previous, *next) {
-            (Content::Window(a), Content::Window(b)) => {
-                a.pid == b.pid && a.window_id == b.window_id && a.app_path == b.app_path
-            }
-            (Content::Tab(a), Content::Tab(b)) => {
-                a.pid == b.pid
-                    && a.window_id == b.window_id
-                    && a.app_path == b.app_path
-                    && if a.identifier.is_empty() {
-                        a.title == b.title
-                    } else {
-                        a.identifier == b.identifier
-                    }
-            }
-            _ => false,
-        })
-        .map(|(i, _)| i)
-        .collect();
-    if candidates.len() != 1 {
-        return None;
-    }
-    let i = candidates[0];
-    if let (Content::Tab(a), Content::Tab(b)) = (previous, &entries[i]) {
-        if a.identifier.is_empty() && a.index != b.index {
-            return None;
-        }
-    }
-    Some(i)
-}
-#[cfg(any(target_os = "macos", test))]
 pub fn remap_selection(old: &[String], new: &[String], slot: Option<usize>) -> Option<usize> {
     slot.and_then(|i| old.get(i))
         .and_then(|p| new.iter().position(|n| n == p))
@@ -208,36 +124,6 @@ mod tests {
         let v = serde_json::to_value(s).unwrap();
         assert!(v.get("wheel").is_none());
         assert!(v.get("content").is_none());
-    }
-    #[test]
-    fn tab_index_reuse_is_not_identity() {
-        let a = Tab {
-            pid: 1,
-            window_id: 2,
-            index: 1,
-            title: "A".into(),
-            ..Tab::default()
-        };
-        let mut moved = a.clone();
-        moved.index = 2;
-        let b = Tab {
-            title: "B".into(),
-            ..a.clone()
-        };
-        assert_eq!(
-            match_content(
-                &Content::Tab(a.clone()),
-                &[Content::Tab(b), Content::Tab(moved.clone())]
-            ),
-            None
-        );
-        let mut a = a;
-        a.identifier = "stable-a".into();
-        moved.identifier = a.identifier.clone();
-        assert_eq!(
-            match_content(&Content::Tab(a), &[Content::Tab(moved)]),
-            Some(0)
-        );
     }
     #[test]
     fn live_dock_changes_keep_identity_not_index() {
