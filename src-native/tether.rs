@@ -35,6 +35,8 @@ pub struct Tether {
     x: Spring,
     y: Spring,
     curve: Spring,
+    routing: Spring,
+    slack: Spring,
     opacity: Spring,
     last_time: f64,
     last_pointer: Point,
@@ -45,6 +47,7 @@ pub struct Tether {
 pub struct Target {
     pub center: Point,
     pub half_icon: f64,
+    pub detour: f64,
 }
 #[derive(Clone, Copy)]
 pub struct Frame {
@@ -61,6 +64,8 @@ impl Tether {
         self.x.set(origin.x);
         self.y.set(origin.y);
         self.curve.set(0.);
+        self.routing.set(0.);
+        self.slack.set(0.);
         self.opacity.set(0.);
         self.last_pointer = origin;
         self.last_time = now;
@@ -71,7 +76,10 @@ impl Tether {
         Point::new(self.x.value, self.y.value)
     }
     pub fn bend(&self) -> f64 {
-        self.curve.value.clamp(-18., 18.)
+        (self.curve.value + self.routing.value).clamp(-96., 96.)
+    }
+    pub fn sag(&self) -> f64 {
+        self.slack.value.clamp(0., 12.)
     }
     pub fn alpha(&self) -> f64 {
         self.opacity.value.clamp(0., 1.)
@@ -86,7 +94,13 @@ impl Tether {
             enabled,
             reduced,
         } = frame;
-        let before = (self.tip(), self.bend(), self.alpha(), self.snapped);
+        let before = (
+            self.tip(),
+            self.bend(),
+            self.alpha(),
+            self.snapped,
+            self.sag(),
+        );
         let dt = (now - self.last_time).clamp(0., 0.05);
         self.last_time = now;
         let distance = origin.distance(pointer);
@@ -138,32 +152,97 @@ impl Tether {
             0.
         };
         self.last_pointer = pointer;
+        let detour = if show {
+            target.map(|target| target.detour).unwrap_or(0.)
+        } else {
+            0.
+        };
+        let slack = if show && !self.snapped {
+            ((115. - distance) / 70.).clamp(0., 1.) * 12.
+        } else {
+            0.
+        };
         if reduced {
             self.x.set(goal.x);
             self.y.set(goal.y);
             self.curve.set(0.);
+            self.routing.set(detour);
+            self.slack.set(0.);
             self.opacity.set(desired_alpha);
         } else {
             self.x.step(goal.x, dt, 48.);
             self.y.step(goal.y, dt, 48.);
             self.curve.step(tangent, dt, 32.);
+            self.routing.step(detour, dt, 32.);
+            self.slack.step(slack, dt, 32.);
             self.opacity.step(desired_alpha, dt, 36.);
         }
         before.0.distance(self.tip()) > 0.04
             || (before.1 - self.bend()).abs() > 0.02
             || (before.2 - self.alpha()).abs() > 0.002
             || before.3 != self.snapped
+            || (before.4 - self.sag()).abs() > 0.02
     }
+}
+/// Keep an outer link in the open gap beside an intervening inner icon.
+pub fn route_around(
+    origin: Point,
+    end: Point,
+    obstacles: impl IntoIterator<Item = (Point, f64)>,
+) -> f64 {
+    let distance = origin.distance(end);
+    if distance < 1. {
+        return 0.;
+    }
+    let ux = (end.x - origin.x) / distance;
+    let uy = (end.y - origin.y) / distance;
+    let mut chosen = 0f64;
+    for (center, radius) in obstacles {
+        let along = (center.x - origin.x) * ux + (center.y - origin.y) * uy;
+        let t = along / distance;
+        if !(0.12..0.88).contains(&t) {
+            continue;
+        }
+        let across = (center.x - origin.x) * (-uy) + (center.y - origin.y) * ux;
+        let clearance = radius + 9.;
+        if across.abs() < clearance {
+            let needed = ((clearance - across.abs() + 3.) / (2. * t * (1. - t))).min(84.);
+            let bend = if across > 0. { -needed } else { needed };
+            if bend.abs() > chosen.abs() {
+                chosen = bend;
+            }
+        }
+    }
+    chosen
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn outer_links_leave_clearance_for_the_inner_icon() {
+        let origin = Point::new(0., 0.);
+        let end = Point::new(200., 0.);
+        let obstacle = Point::new(120., 0.);
+        let bend = route_around(origin, end, [(obstacle, 24.)]);
+        let min = (0..=100)
+            .map(|i| {
+                let t = i as f64 / 100.;
+                Point::new(200. * t, 2. * t * (1. - t) * bend).distance(obstacle)
+            })
+            .fold(f64::INFINITY, f64::min);
+        assert!(min > 30.);
+        assert_eq!(
+            route_around(origin, end, [(Point::new(120., 70.), 24.)]),
+            0.
+        );
+    }
     #[test]
     fn cursor_stretches_then_snaps_to_the_icon_edge() {
         let origin = Point::new(0., 0.);
         let target = Target {
             center: Point::new(120., 0.),
             half_icon: 23.,
+            detour: 0.,
         };
         let mut t = Tether::default();
         t.reset(origin, 0.);
@@ -180,6 +259,7 @@ mod tests {
         }
         assert!(!t.snapped);
         assert!((t.tip().x - 65.).abs() < 0.1);
+        assert!(t.sag() > 5.);
         for i in 40..80 {
             t.advance(Frame {
                 now: i as f64 / 60.,
@@ -203,6 +283,7 @@ mod tests {
         let target = Target {
             center: Point::new(120., 0.),
             half_icon: 23.,
+            detour: 0.,
         };
         let mut frame = Frame {
             now: 0.1,
@@ -229,6 +310,7 @@ mod tests {
         frame.target = Some(Target {
             center: Point::new(240., 0.),
             half_icon: 23.,
+            detour: 0.,
         });
         frame.pointer = Point::new(190., 0.);
         frame.now = 0.3;
@@ -284,6 +366,7 @@ mod tests {
         });
         assert!((t.tip().distance(p) - 220.).abs() < 0.001);
         assert_eq!(t.bend(), 0.);
+        assert_eq!(t.sag(), 0.);
         t.advance(Frame {
             now: 101.,
             origin: p,

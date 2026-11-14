@@ -212,7 +212,7 @@ impl State {
         let start = NSPoint::new(origin.x + ux * 16., origin.y + uy * 16.);
         let control = NSPoint::new(
             (start.x + tip.x) / 2. - uy * self.tether.bend(),
-            (start.y + tip.y) / 2. + ux * self.tether.bend(),
+            (start.y + tip.y) / 2. + ux * self.tether.bend() + self.tether.sag(),
         );
         let path = NSBezierPath::bezierPath();
         path.moveToPoint(start);
@@ -237,19 +237,81 @@ impl State {
             NSColor::colorWithSRGBRed_green_blue_alpha(0.60, 0.47, 0.32, 0.82 * alpha)
         };
         c.setStroke();
-        path.setLineWidth(2.8);
+        path.setLineWidth(3.8);
         path.stroke();
-        if !self.tether.snapped {
-            fill(
-                &NSBezierPath::bezierPathWithOvalInRect(rect(r(
-                    tip.x - 2.4,
-                    tip.y - 2.4,
-                    4.8,
-                    4.8,
-                ))),
-                &c,
-            );
+        // A few low-contrast diagonal threads read as webbing without adding an image asset.
+        let weave = NSBezierPath::bezierPath();
+        let steps = (length / 6.).floor().max(1.) as usize;
+        for i in 1..steps {
+            let t = i as f64 / steps as f64;
+            let q = 1. - t;
+            let x = q * q * start.x + 2. * q * t * control.x + t * t * tip.x;
+            let y = q * q * start.y + 2. * q * t * control.y + t * t * tip.y;
+            let tx = 2. * q * (control.x - start.x) + 2. * t * (tip.x - control.x);
+            let ty = 2. * q * (control.y - start.y) + 2. * t * (tip.y - control.y);
+            let d = tx.hypot(ty).max(1.);
+            let (tx, ty) = (tx / d, ty / d);
+            weave.moveToPoint(NSPoint::new(
+                x - tx * 0.7 + ty * 1.1,
+                y - ty * 0.7 - tx * 1.1,
+            ));
+            weave.lineToPoint(NSPoint::new(
+                x + tx * 0.7 - ty * 1.1,
+                y + ty * 0.7 + tx * 1.1,
+            ));
         }
+        NSColor::colorWithSRGBRed_green_blue_alpha(1., 0.94, 0.79, 0.52 * alpha).setStroke();
+        weave.setLineWidth(0.65);
+        weave.stroke();
+        let direction = Point::new(ux, uy);
+        Self::cord_loop(
+            Point::new(origin.x + ux * 27., origin.y + uy * 27.),
+            direction,
+            5.2,
+            3.4,
+            alpha,
+            &c,
+        );
+        Self::cord_loop(
+            tip,
+            direction,
+            if self.tether.snapped { 5.6 } else { 10. },
+            if self.tether.snapped { 4. } else { 6. },
+            alpha,
+            &c,
+        );
+    }
+    unsafe fn cord_loop(
+        center: Point,
+        direction: Point,
+        width: f64,
+        height: f64,
+        alpha: f64,
+        ink: &NSColor,
+    ) {
+        let loop_path = NSBezierPath::bezierPath();
+        for step in 0..=24 {
+            let angle = std::f64::consts::TAU * step as f64 / 24.;
+            let a = angle.cos() * width / 2.;
+            let b = angle.sin() * height / 2.;
+            let point = NSPoint::new(
+                center.x + direction.x * a - direction.y * b,
+                center.y + direction.y * a + direction.x * b,
+            );
+            if step == 0 {
+                loop_path.moveToPoint(point)
+            } else {
+                loop_path.lineToPoint(point)
+            }
+        }
+        loop_path.closePath();
+        loop_path.setLineJoinStyle(NSLineJoinStyle::Round);
+        NSColor::colorWithWhite_alpha(1., 0.65 * alpha).setStroke();
+        loop_path.setLineWidth(3.2);
+        loop_path.stroke();
+        ink.setStroke();
+        loop_path.setLineWidth(1.4);
+        loop_path.stroke();
     }
     pub(super) unsafe fn sync_glass(&mut self) {
         let selected = self
@@ -305,6 +367,13 @@ impl State {
                 let _: () = msg_send![&**glass,setStyle:style];
             }
             let _: () = msg_send![&**glass,setCornerRadius:radius-0.25];
+        }
+        if AnyClass::get(c"NSGlassEffectView").is_none() {
+            glass.setWantsLayer(true);
+            if let Some(layer) = glass.layer() {
+                let _: () = msg_send![&*layer,setCornerRadius:radius];
+                let _: () = msg_send![&*layer,setMasksToBounds:true];
+            }
         }
         glass.setAlphaValue(self.hover_mix[index]);
         glass.setHidden(false);
@@ -659,6 +728,27 @@ impl State {
                     Target {
                         center: Point::new(x, y),
                         half_icon: side / 2.,
+                        detour: if self.ring.nodes[i].ring > 0 {
+                            let origin = Point::new(
+                                self.center.0,
+                                self.center.1 - self.settings.wheel_size_px * 0.022,
+                            );
+                            crate::tether::route_around(
+                                origin,
+                                Point::new(x, y),
+                                self.ring
+                                    .nodes
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, node)| node.ring < self.ring.nodes[i].ring)
+                                    .map(|(j, _)| {
+                                        let (x, y, side) = self.node_pose(j);
+                                        (Point::new(x, y), side / 2.)
+                                    }),
+                            )
+                        } else {
+                            0.
+                        },
                     }
                 });
             let origin = Point::new(
