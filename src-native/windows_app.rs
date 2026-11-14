@@ -151,6 +151,8 @@ unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
                 h.timer = 0;
             }
             h.modifiers.clear();
+            // The secure desktop may consume V-up while locked. Sample before this event updates OS state.
+            h.physical_v = GetAsyncKeyState(86) as u16 & 0x8000 != 0;
             for vk in [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0x5b, 0x5c] {
                 if GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 {
                     h.modifiers.insert(vk);
