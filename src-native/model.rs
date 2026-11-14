@@ -60,6 +60,7 @@ impl Settings {
             Trigger::Mouse(n) => n == "mouse4" || n == "mouse5",
         }
     }
+    #[cfg(target_os = "macos")]
     pub fn name(&self, path: &str) -> String {
         self.names.get(path).cloned().unwrap_or_else(|| {
             PathBuf::from(path)
@@ -70,8 +71,13 @@ impl Settings {
         })
     }
     pub fn path() -> PathBuf {
-        PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join("Library/Application Support/ViGo/settings.json")
+        #[cfg(target_os = "windows")]
+        let root =
+            PathBuf::from(std::env::var_os("APPDATA").unwrap_or_else(|| ".".into())).join("ViGo");
+        #[cfg(not(target_os = "windows"))]
+        let root = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join("Library/Application Support/ViGo");
+        root.join("settings.json")
     }
     pub fn load() -> (Self, String) {
         let p = Self::path();
@@ -100,6 +106,7 @@ impl Settings {
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg(any(target_os = "macos", test))]
 pub struct DockItem {
     pub path: String,
     pub name: String,
@@ -108,6 +115,7 @@ pub struct DockItem {
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
+#[cfg(any(target_os = "macos", test))]
 pub struct Window {
     pub id: String,
     pub app_path: String,
@@ -121,6 +129,7 @@ pub struct Window {
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
+#[cfg(any(target_os = "macos", test))]
 pub struct Tab {
     pub id: String,
     pub app_path: String,
@@ -132,10 +141,12 @@ pub struct Tab {
     pub selected: bool,
 }
 #[derive(Clone, Debug)]
+#[cfg(any(target_os = "macos", test))]
 pub enum Content {
     Tab(Tab),
     Window(Window),
 }
+#[cfg(any(target_os = "macos", test))]
 impl Content {
     pub fn title(&self) -> &str {
         match self {
@@ -145,6 +156,7 @@ impl Content {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub fn match_content(previous: &Content, entries: &[Content]) -> Option<usize> {
     let candidates: Vec<usize> = entries
         .iter()
@@ -178,6 +190,7 @@ pub fn match_content(previous: &Content, entries: &[Content]) -> Option<usize> {
     }
     Some(i)
 }
+#[cfg(any(target_os = "macos", test))]
 pub fn remap_selection(old: &[String], new: &[String], slot: Option<usize>) -> Option<usize> {
     slot.and_then(|i| old.get(i))
         .and_then(|p| new.iter().position(|n| n == p))
