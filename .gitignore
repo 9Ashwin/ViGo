@@ -10,3 +10,5 @@ tasks/
 .local/
 native/system-helper/build/
 native/glass/build/
+
+/target/
