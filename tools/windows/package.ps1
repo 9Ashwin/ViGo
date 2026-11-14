@@ -1,7 +1,12 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '../..')
-cargo build --release --locked --target x86_64-pc-windows-msvc
-if ($LASTEXITCODE -ne 0) { throw 'Rust build failed' }
+# Explicit target keeps CRT flags away from host proc-macros and build scripts.
+$previousRustFlags = $env:RUSTFLAGS
+try {
+    $env:RUSTFLAGS = "$previousRustFlags -C target-feature=+crt-static"
+    cargo build --release --locked --target x86_64-pc-windows-msvc
+    if ($LASTEXITCODE -ne 0) { throw 'Rust build failed' }
+} finally { $env:RUSTFLAGS = $previousRustFlags }
 $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
 $out = Join-Path (Get-Location) 'release/windows/ViGo'
 New-Item -ItemType Directory -Force $out | Out-Null

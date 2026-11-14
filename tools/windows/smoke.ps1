@@ -4,12 +4,8 @@ $unpack = Join-Path (Get-Location) 'release/windows-smoke'
 Expand-Archive 'release/ViGo-Windows-x64.zip' -DestinationPath $unpack -Force
 $exe = Join-Path $unpack 'ViGo/ViGo.exe'
 # Inspect the actual archived PE, not the working target binary.
-$bytes = [IO.File]::ReadAllBytes($exe)
-$pe = [BitConverter]::ToInt32($bytes, 0x3c)
-if ([BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) { throw 'PE signature missing' }
-if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x8664) { throw 'Expected x64 machine' }
-if ([BitConverter]::ToUInt16($bytes, $pe + 24 + 68) -ne 2) { throw 'Expected GUI subsystem' }
-if ([BitConverter]::ToUInt32($bytes, $pe + 24 + 112 + 16) -eq 0) { throw 'Icon/manifest resource directory missing' }
+python tools/windows/verify-pe.py $exe
+if ($LASTEXITCODE -ne 0) { throw 'PE architecture/resources/runtime verification failed' }
 $report = Join-Path (Get-Location) 'release/windows-smoke.json'
 $proc = Start-Process -FilePath $exe -ArgumentList @('--smoke-test', '--report', ('"' + $report + '"')) -PassThru
 if (-not $proc.WaitForExit(30000)) { $proc.Kill(); throw 'GUI smoke timed out' }
