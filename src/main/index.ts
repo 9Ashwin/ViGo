@@ -1,16 +1,17 @@
+import { previewWindowFor, type OuterItem, type BrowserTab } from '../shared/content';
 import {
-  app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerMonitor, screen, shell, systemPreferences, Tray,
+  app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, screen, shell, systemPreferences, Tray,
 } from 'electron';
 import { join } from 'node:path';
 import { HELPER_VERSION, type HelperConfig, type HelperEvent, type HelperStatus } from '../shared/protocol';
 import { MAX_SLOTS, STARTER_APPS, sanitize, type Settings, type WheelItem } from '../shared/settings';
-import { appIcon, availableShortcuts, installedApps, launchApp, wheelItems, wheelSkeleton } from './apps';
+import { appIcon, installedApps, launchApp, launchContent, wheelItems, wheelSkeleton } from './apps';
 import { InputBridge } from './inputBridge';
 import { AccessibilityGate } from './accessibilityGate';
 import { Overlay } from './overlay';
 import { loadSettings, saveSettings } from './settingsStore';
-import { activateWindow, listWindows, requestScreenPreview, watchWindowPreview } from './windows';
-import type { WindowState } from '../shared/windows';
+import { activateWindow, activateBrowserTab, listBrowserTabs, listWindows, watchWindowPreview } from './windows';
+import type { WindowState, WindowItem } from '../shared/windows';
 
 // This menu bar utility restores its own state. AppKit's crash-recovery dialog can otherwise
 // block `ready` after an abnormal exit. Registration is in-memory, not a system preference write.
@@ -51,10 +52,13 @@ let page = 0;
 let activeItems: WheelItem[] = [];
 let wheelGeneration = 0;
 let windowState: WindowState = { accessibility: false, screen: false, running: [], windows: [] };
+let browserTabs: BrowserTab[] = [];
 let windowScan: Promise<void> | null = null;
 let windowTimer: NodeJS.Timeout | null = null;
 let previewGeneration = 0;
 let previewWindow: string | null = null;
+let previewSelection: WindowItem | null = null;
+let hoveredContent: OuterItem | null = null;
 let stopPreview: (() => void) | null = null;
 let screenRequested = false;
 let screenLocked = false;
@@ -85,7 +89,24 @@ function syncSuspended(): void {
 }
 
 function withWindows(item: WheelItem): WheelItem {
-  return { ...item, running: windowState.running.includes(item.path), windows: windowState.windows.filter((w) => w.appPath === item.path) };
+  return { ...item, content: settings.content[item.path] ?? [], tabs: browserTabs.filter((tab) => tab.appPath === item.path), running: windowState.running.includes(item.path), windows: windowState.windows.filter((w) => w.appPath === item.path) };
+}
+
+function pageItems(): WheelItem[] {
+  const result = items.slice(page * settings.slotsPerPage, (page + 1) * settings.slotsPerPage);
+  while (result.length < settings.slotsPerPage) result.push({ name: '', path: '', icon: '' });
+  return result;
+}
+
+function cancelKeyCapture(): void {
+  if (!capturing) return;
+  capturing = false;
+  syncSuspended();
+  const win = settingsWin;
+  if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+    win.webContents.send('capture:cancel');
+    win.webContents.send('settings:changed', stateSnapshot());
+  }
 }
 
 function finishGesture(): void {
@@ -93,9 +114,9 @@ function finishGesture(): void {
   previewGeneration++;
   stopPreview?.();
   stopPreview = null;
-  previewWindow = null;
+  previewWindow = null; previewSelection = null; hoveredContent = null;
   hovered = null;
-  overlay?.close();
+  overlay?.close(screenLocked || quitting || capturing);
 }
 
 async function refreshItems(): Promise<void> {
@@ -109,23 +130,42 @@ function refreshWindows(): Promise<void> {
   if (screenLocked || quitting) return Promise.resolve();
   if (windowScan) return windowScan;
   const snapshot = settings;
-  windowScan = listWindows(snapshot.wheel).then((value) => {
+  windowScan = Promise.all([listWindows(snapshot.wheel), listBrowserTabs(snapshot.wheel)]).then(([value, tabs]) => {
     if (snapshot !== settings) return;
     windowState = value;
+    browserTabs = tabs;
     items = items.map(withWindows);
-    if (overlay && overlay.geometry.count > 0 && hovered === null) {
+    if (overlay && overlay.geometry.count > 0 && !overlay.hoveringContent) {
       activeItems = activeItems.map(withWindows);
       overlay.update(activeItems, settings.wheelSizePx, page);
       overlay.hover(hovered);
+      updateHoveredPreview();
     }
     settingsWin?.webContents.send('settings:changed', stateSnapshot());
   }).finally(() => { windowScan = null; if (snapshot !== settings) void refreshWindows(); });
   return windowScan;
 }
 
+function updateHoveredPreview(): void {
+  const owner = hovered === null ? undefined : activeItems[hovered];
+  const selected = settings.windowPreviews ? previewWindowFor(owner, hoveredContent) : null;
+  previewSelection = selected;
+  const key = selected ? `${selected.id}:${selected.minimized}` : null;
+  if (key === previewWindow) return;
+  previewWindow = key;
+  const generation = ++previewGeneration;
+  stopPreview?.(); stopPreview = null; overlay?.preview(null);
+  if (selected) stopPreview = watchWindowPreview(selected, (result) => {
+    if (generation === previewGeneration && overlay && overlay.geometry.count > 0 && previewSelection)
+      overlay.preview(previewSelection, result);
+  });
+}
+
 function applySettings(next: Settings): void {
   finishGesture();
   settings = sanitize(next);
+  nativeTheme.themeSource = settings.appearance;
+  page = Math.min(page, Math.ceil(MAX_SLOTS / settings.slotsPerPage) - 1);
   saveSettings(settings);
   // An unsigned dev build may not register a login item; the packaged app can.
   if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: settings.launchAtLogin });
@@ -142,6 +182,7 @@ interface StateSnapshot {
   maxSlots: number;
   helperVersion: number;
   staleAccess: boolean;
+  capturing: boolean;
   screenPermission: boolean;
 }
 
@@ -153,66 +194,57 @@ function stateSnapshot(): StateSnapshot {
     maxSlots: MAX_SLOTS,
     helperVersion: HELPER_VERSION,
     staleAccess,
-    screenPermission: windowState.screen,
+    capturing,
+    screenPermission: systemPreferences.getMediaAccessStatus('screen') === 'granted',
   };
 }
 
 function onHelperEvent(ev: HelperEvent): void {
   switch (ev.type) {
     case 'scroll': {
-      previewGeneration++;
-      stopPreview?.();
-      stopPreview = null;
-      previewWindow = null;
-      overlay?.preview(null);
-      if (!overlay || overlay.geometry.count === 0 || !ev.delta) break;
-      page = (page + (ev.delta < 0 ? 1 : 2)) % 3;
-      activeItems = items.slice(page * 8, page * 8 + 8);
-      while (activeItems.length < 8) activeItems.push({ name: '', path: '', icon: '' });
+      if (!overlay || overlay.geometry.count === 0 || !ev.delta || overlay.inOuterRegion(ev.x, ev.y)) break;
+      previewGeneration++; stopPreview?.(); stopPreview = null;
+      previewWindow = null; previewSelection = null; hoveredContent = null; overlay.preview(null);
+      const pages = Math.ceil(MAX_SLOTS / settings.slotsPerPage);
+      page = (page + (ev.delta < 0 ? 1 : pages - 1)) % pages;
+      activeItems = pageItems();
       // Keep the centre fixed while switching pages during a held gesture.
       overlay.update(activeItems, settings.wheelSizePx, page);
       hovered = overlay.slotAt(ev.x, ev.y);
       overlay.hover(hovered);
+      updateHoveredPreview();
       break;
     }
     case 'wheelOpen': {
       finishGesture();
-      if (screenLocked || capturing) return;
+      if (screenLocked || capturing || status !== 'running') return;
       void refreshWindows();
       if (!items.some((item) => item.path)) {
         // Nothing pinned yet: no empty ring to stare at. The tray menu opens settings.
         return;
       }
       hovered = null;
-      activeItems = items.slice(page * 8, page * 8 + 8);
-      overlay?.open(ev.x, ev.y, activeItems, settings.wheelSizePx, page);
+      activeItems = pageItems();
+      overlay?.open(ev.x, ev.y, activeItems, settings.wheelSizePx, page, settings.appearance, settings.windowPreviews);
       break;
     }
     case 'wheelMove': {
+      if (!overlay || overlay.geometry.count === 0 || screenLocked || capturing || status !== 'running') break;
       const choice = overlay?.selectAt(ev.x, ev.y);
       hovered = choice?.slot ?? null;
-      const selected = choice?.window ?? null;
-      if ((selected?.id ?? null) !== previewWindow) {
-        previewWindow = selected?.id ?? null;
-        const generation = ++previewGeneration;
-        stopPreview?.();
-        stopPreview = null;
-        overlay?.preview(null);
-        if (selected && settings.windowPreviews) {
-          stopPreview = watchWindowPreview(selected, (result) => {
-            if (generation === previewGeneration && overlay && overlay.geometry.count > 0)
-              overlay.preview(selected, result.image, result.cached);
-          });
-        }
-      }
+      hoveredContent = choice?.content ?? null;
+      updateHoveredPreview();
       break;
     }
     case 'wheelRelease': {
+      if (!overlay || overlay.geometry.count === 0 || screenLocked || capturing || status !== 'running') break;
       const choice = overlay?.selectAt(ev.x, ev.y);
       const i = choice?.slot ?? null;
       const picked = i === null ? undefined : activeItems[i];
       finishGesture();
-      if (choice?.window) void activateWindow(choice.window).then((ok) => { if (!ok && !screenLocked && !quitting) overlay?.toast('这个窗口已关闭或暂时无法切换，请重新选择。'); });
+      if (choice?.content?.kind === 'pin' && picked) launchContent(picked.path, choice.content.target, (message) => { if (!screenLocked && !quitting) overlay?.toast(message); });
+      else if (choice?.content?.kind === 'tab') void activateBrowserTab(choice.content.tab).then((ok) => { if (!ok && !screenLocked && !quitting) overlay?.toast('标签已变化，请重新呼出轮盘选择。'); });
+      else if (choice?.window) void activateWindow(choice.window).then((ok) => { if (!ok && !screenLocked && !quitting) overlay?.toast('这个窗口已关闭或暂时无法切换，请重新选择。'); });
       else if (picked) launchApp(picked.path, (message) => { if (!screenLocked && !quitting) overlay?.toast(message); });
       break;
     }
@@ -280,14 +312,14 @@ function openSettings(): void {
     return;
   }
   settingsWin = new BrowserWindow({
-    width: 1040,
-    height: 760,
+    width: 900,
+    height: 640,
     minWidth: 900,
     minHeight: 640,
     title: 'ViGo',
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#00000000',
-    vibrancy: 'sidebar',
+    vibrancy: 'under-window',
     visualEffectState: 'active',
     webPreferences: {
       preload: join(__dirname, '../preload/settings.js'),
@@ -296,6 +328,9 @@ function openSettings(): void {
     },
   });
   void loadPage(settingsWin, 'settings');
+  settingsWin.on('blur', cancelKeyCapture);
+  settingsWin.on('hide', cancelKeyCapture);
+  settingsWin.on('minimize', cancelKeyCapture);
   settingsWin.on('closed', () => {
     capturing = false;
     syncSuspended();
@@ -322,7 +357,7 @@ function previewWheel(nextPage = 0): void {
   if (screenLocked) return;
   finishGesture();
   const generation = wheelGeneration;
-  page = Math.max(0, Math.min(2, Math.floor(nextPage)));
+  page = Math.max(0, Math.min(Math.ceil(MAX_SLOTS / settings.slotsPerPage) - 1, Math.floor(nextPage)));
   if (!items.some((item) => item.path)) {
     void dialog.showMessageBox({ message: '轮盘还是空的', detail: '先在设置里把一个动作拖到轮盘上。' });
     openSettings();
@@ -330,9 +365,10 @@ function previewWheel(nextPage = 0): void {
   }
   const p = screen.getCursorScreenPoint();
   hovered = null;
-  activeItems = items.slice(page * 8, page * 8 + 8);
-  overlay?.open(p.x, p.y, activeItems, settings.wheelSizePx, page);
-  overlay?.hover(activeItems.findIndex((item) => item.path) >= 0 ? activeItems.findIndex((item) => item.path) : null);
+  activeItems = pageItems();
+  overlay?.open(p.x, p.y, activeItems, settings.wheelSizePx, page, settings.appearance, settings.windowPreviews);
+  hovered = activeItems.findIndex((item) => item.path) >= 0 ? activeItems.findIndex((item) => item.path) : null;
+  hoveredContent = null; overlay?.hover(hovered); updateHoveredPreview();
   setTimeout(() => {
     if (generation !== wheelGeneration) return;
     finishGesture();
@@ -360,7 +396,7 @@ function createTray(): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('settings:get', () => ({ ...stateSnapshot(), installed: installedApps() }));
+  ipcMain.handle('settings:get', async () => ({ ...stateSnapshot(), installed: await installedApps() }));
   ipcMain.handle('settings:save', (_e, next: unknown) => {
     applySettings(next as Settings);
     return stateSnapshot();
@@ -369,11 +405,16 @@ function registerIpc(): void {
   ipcMain.handle('settings:open-accessibility', () => requestAccessibility());
   ipcMain.handle('settings:preview-wheel', (_e, nextPage: unknown) => previewWheel(typeof nextPage === 'number' ? nextPage : 0));
   ipcMain.handle('settings:quit', () => app.quit());
-  ipcMain.handle('settings:shortcuts', () => availableShortcuts());
+  ipcMain.handle('settings:tabs', (_event, owner: string) => settings.wheel.includes(owner) ? listBrowserTabs([owner]) : []);
   ipcMain.handle('settings:window-preview-permission', async () => {
-    if (!windowState.screen) {
-      if (!screenRequested) { screenRequested = true; await requestScreenPreview(); }
-      void shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+    if (systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
+      if (!screenRequested) {
+        screenRequested = true;
+        // Request from the signed root application so macOS registers the correct identity.
+        await desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width: 0, height: 0 } }).catch(() => []);
+      }
+      if (systemPreferences.getMediaAccessStatus('screen') !== 'granted')
+        void shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
     }
     await refreshWindows();
     return stateSnapshot();
@@ -381,8 +422,14 @@ function registerIpc(): void {
   ipcMain.handle('settings:browse', async () => (await dialog.showOpenDialog({
     title: '添加到 ViGo', properties: ['openFile', 'openDirectory', 'multiSelections'],
   })).filePaths);
-  ipcMain.handle('settings:capturing', (_e, on: unknown) => {
-    if (typeof on === 'boolean') { capturing = on; if (on) finishGesture(); syncSuspended(); }
+  ipcMain.handle('settings:capturing', (event, on: unknown) => {
+    const win = settingsWin;
+    if (!win || win.isDestroyed() || event.sender.id !== win.webContents.id) return;
+    if (typeof on !== 'boolean') return;
+    if (on && !settingsWin?.isFocused()) { settingsWin?.webContents.send('capture:cancel'); return; }
+    if (capturing === on) return;
+    capturing = on; if (on) finishGesture(); syncSuspended();
+    settingsWin?.webContents.send('settings:changed', stateSnapshot());
   });
 }
 
@@ -394,6 +441,8 @@ if (!gotLock) {
   app.on('activate', () => { if (app.isReady()) openSettings(); });
 
   void app.whenReady().then(async () => {
+    nativeTheme.themeSource = settings.appearance;
+    app.dock?.setIcon(assetPath(app.isPackaged ? 'appIcon.png' : 'icon.png'));
     if (process.env.VIGO_SHOW_DOCK !== '1') app.dock?.hide();
     registerIpc();
     Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -410,10 +459,11 @@ if (!gotLock) {
     ]));
     overlay = new Overlay(join(__dirname, '../preload/overlay.js'), pageUrl('overlay').file, process.env.ELECTRON_RENDERER_URL ? pageUrl('overlay').dev : undefined);
     overlay.create();
+    await installedApps();
     await refreshItems();
     createTray();
     screenLocked = powerMonitor.getSystemIdleState(60) === 'locked';
-    powerMonitor.on('lock-screen', () => { screenLocked = true; finishGesture(); syncSuspended(); });
+    powerMonitor.on('lock-screen', () => { screenLocked = true; cancelKeyCapture(); finishGesture(); syncSuspended(); });
     powerMonitor.on('unlock-screen', () => {
       if (quitting) return;
       screenLocked = false;
@@ -424,11 +474,11 @@ if (!gotLock) {
     });
     startHelper();
     void refreshWindows();
-    windowTimer = setInterval(() => { void refreshWindows(); }, 4000);
+    windowTimer = setInterval(() => { if ((overlay?.geometry.count ?? 0) > 0) void refreshWindows(); }, 4000);
     windowTimer.unref();
     if (!items.some((item) => item.path)) {
       // First run: seed the ring with whatever of the usual suspects is installed.
-      const installed = new Set(installedApps().map((a) => a.path));
+      const installed = new Set((await installedApps()).map((a) => a.path));
       applySettings({ ...settings, wheel: STARTER_APPS.filter((p) => installed.has(p)).slice(0, 8) });
       openSettings();
     }

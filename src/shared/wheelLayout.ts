@@ -24,7 +24,24 @@ export type WheelPatch<T extends string> = { wheel?: T[]; center?: T };
 
 /** The change for dropping `src` on `target`, or null when nothing changes. */
 export function dropPatch<T extends string>(wheel: readonly T[], center: T, src: WheelSource<T>, target: WheelTarget): WheelPatch<T> | null {
+  if (!src.id) return null;
   if (target === 'center') return src.id === center ? null : { center: src.id };
-  if (src.from === 'slot') return src.slot === target ? null : { wheel: swapSlots(wheel, src.slot, target) };
+  if (src.from === 'slot') {
+    const from = wheel.indexOf(src.id);
+    return from === target ? null : { wheel: from >= 0 ? swapSlots(wheel, from, target) : placeOnSlot(wheel, src.id, target) };
+  }
   return wheel[target] === src.id ? null : { wheel: placeOnSlot(wheel, src.id, target) };
+}
+
+/** Merge an editor drop into a page. An existing action moved across pages swaps with its destination. */
+export function applyPagePatch(all: readonly string[], page: number, count: number, incoming: readonly string[]): string[] {
+  const start = page * count, next = [...all];
+  while (next.length < start + count) next.push('');
+  incoming.forEach((value, offset) => {
+    if (!value) return;
+    const from = all.indexOf(value);
+    if (from >= 0 && (from < start || from >= start + count)) next[from] = all[start + offset] ?? '';
+  });
+  next.splice(start, count, ...incoming);
+  return next;
 }

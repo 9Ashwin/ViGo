@@ -6,10 +6,10 @@ export const WHEEL = { size: 600, innerR: 86, outerR: 188, extR: 288, iconR: 137
  * Returns -1 inside the dead zone, else 0..7 where 0 = N and indices go clockwise.
  * Slices are 45° wide and centred on the compass directions.
  */
-export function pickSlice(dx: number, dy: number, deadZone: number = WHEEL.innerR): number {
+export function pickSlice(dx: number, dy: number, deadZone: number = WHEEL.innerR, count = 8): number {
   if (Math.hypot(dx, dy) < deadZone) return -1;
-  const deg = ((Math.atan2(dy, dx) * 180) / Math.PI + 90 + 22.5 + 360) % 360;
-  return Math.floor(deg / 45) % 8;
+  const deg = ((Math.atan2(dy, dx) * 180) / Math.PI + 90 + 180 / count + 360) % 360;
+  return Math.floor(deg / (360 / count)) % count;
 }
 
 /**
@@ -37,8 +37,8 @@ export interface WheelBox {
 }
 
 /** Keep the press point at the hub even when the overlay window is clamped at a display edge. */
-export function wheelBoxAt(x: number, y: number, originX: number, originY: number, size: number): WheelBox {
-  return { cx: x - originX, cy: y - originY, count: 8,
+export function wheelBoxAt(x: number, y: number, originX: number, originY: number, size: number, count = 8): WheelBox {
+  return { cx: x - originX, cy: y - originY, count,
     inner: WHEEL.innerR * size / WHEEL.size, outer: WHEEL.extR * size / WHEEL.size };
 }
 
@@ -69,4 +69,14 @@ export function slotIconCentre(i: number, count: number, box: WheelBox): { x: nu
   const mid = (start + end) / 2;
   const radius = (box.inner + box.outer) / 2;
   return { x: box.cx + Math.cos(mid) * radius, y: box.cy + Math.sin(mid) * radius };
+}
+
+/** A small angular deadband keeps the visible selection stable at sector boundaries. */
+export function stableSlotAt(x: number, y: number, box: WheelBox, previous: number | null): number | null {
+  const candidate = slotAt(x, y, box);
+  if (candidate === null || previous === null || previous === candidate || previous >= box.count) return candidate;
+  const angle = Math.atan2(y - box.cy, x - box.cx);
+  const center = -Math.PI / 2 + previous * Math.PI * 2 / box.count;
+  const distance = Math.abs(Math.atan2(Math.sin(angle - center), Math.cos(angle - center)));
+  return distance <= Math.PI / box.count + Math.PI / 60 ? previous : candidate;
 }

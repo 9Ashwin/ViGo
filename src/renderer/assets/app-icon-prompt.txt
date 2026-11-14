@@ -1,0 +1,3 @@
+Character reference: user-supplied mascot-sheet.png, fourth row standing cat with tie.
+Final direction: warm ivory, cream, oatmeal, caramel and chocolate palette; sculpted soft 3D clay/vinyl; same white-and-brown markings and simple blue oval eyes; standing on hind paws, head tilted upward, one forepaw raised beside cheek, curled brown tail. Full-body cat is the hero on a softly beveled ivory macOS superellipse tile. No V or other letters, no laptop in front, no desk or extra props. Transparent exterior.
+Generated with image_gen from the supplied sheet. Original sheet pixels remain unchanged in the app's animation asset.

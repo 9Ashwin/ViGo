@@ -12,9 +12,9 @@ const R_OUT = 146;
 const R_ICON = 100;
 const GAP = 0.035;
 const pt = (r: number, a: number): string => `${C + r * Math.sin(a)},${C - r * Math.cos(a)}`;
-const wedgePath = (i: number): string => {
-  const a0 = ((i - 0.5) * Math.PI) / 4 + GAP;
-  const a1 = ((i + 0.5) * Math.PI) / 4 - GAP;
+const wedgePath = (i: number, count: number): string => {
+  const a0 = ((i - 0.5) * Math.PI * 2) / count + GAP;
+  const a1 = ((i + 0.5) * Math.PI * 2) / count - GAP;
   return `M${pt(R_IN, a0)} A${R_IN},${R_IN} 0 0 1 ${pt(R_IN, a1)} L${pt(R_OUT, a1)} A${R_OUT},${R_OUT} 0 0 0 ${pt(R_OUT, a0)}Z`;
 };
 
@@ -34,7 +34,7 @@ export interface PoolItem<T extends string> {
 interface Props<T extends string> {
   wheel: readonly T[];
   center: T;
-  centerIcon?: string;
+  centerArt?: ReactNode;
   centerOn: boolean;
   trigger: string;
   pool: readonly PoolItem<T>[];
@@ -43,6 +43,9 @@ interface Props<T extends string> {
   labels: { title: string; desc: string; poolTitle: string; poolDesc: string };
   /** Rendered under the pool's tiles, outside their scroll box, so it stays in view however long the pool is. */
   poolExtra?: ReactNode;
+  inspector?: ReactNode;
+  onInspect?: (id: T) => void;
+  onRequestIcon?: (id: T) => void;
   /** Files dragged in from outside and dropped on the pool. Without it the pool takes no files. */
   onDropFiles?: (files: File[]) => void;
   onChange: (patch: WheelPatch<T>) => void;
@@ -57,13 +60,28 @@ const activate = (fn: () => void) => (e: KeyboardEvent) => {
 };
 
 export function WheelEditor<T extends string>({
-  wheel, center, centerIcon, centerOn, trigger, pool, visibleIds, defaults, labels, poolExtra, onDropFiles, onChange, onPreview,
+  wheel, center, centerArt, centerOn, trigger, pool, visibleIds, defaults, labels, poolExtra, inspector, onInspect, onRequestIcon, onDropFiles, onChange, onPreview,
 }: Props<T>) {
   const t = useText();
   const [picked, setPicked] = useState<WheelSource<T> | null>(null);
   const [hot, setHot] = useState<WheelTarget | null>(null);
   const [filesOver, setFilesOver] = useState(false);
   const drag = useRef<WheelSource<T> | null>(null);
+  const tiles = useRef<HTMLDivElement>(null);
+  const tileKey = pool.filter((item) => !visibleIds || visibleIds.has(item.id)).map((item) => item.id).join('\n');
+  useEffect(() => {
+    const host = tiles.current;
+    if (!host || !onRequestIcon) return;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) if (entry.isIntersecting) {
+        const id = (entry.target as HTMLElement).dataset.poolId;
+        if (id) onRequestIcon(id as T);
+        observer.unobserve(entry.target);
+      }
+    }, { root: host, rootMargin: '120px' });
+    host.querySelectorAll('[data-pool-id]').forEach((element) => observer.observe(element));
+    return () => observer.disconnect();
+  }, [tileKey, Boolean(inspector), onRequestIcon]);
 
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
@@ -73,6 +91,8 @@ export function WheelEditor<T extends string>({
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  useEffect(() => { setPicked(null); drag.current = null; setHot(null); }, [Boolean(inspector)]);
+
   const apply = (src: WheelSource<T>, target: WheelTarget) => {
     const patch = dropPatch(wheel, center, src, target);
     if (patch) onChange(patch);
@@ -81,8 +101,9 @@ export function WheelEditor<T extends string>({
 
   /** Click on a slot or the centre: place the picked item there, or pick up what's there. */
   const clickTarget = (target: WheelTarget, here: WheelSource<T>) => {
+    if (inspector) { if (here.id) onInspect?.(here.id); setPicked(null); return; }
     if (picked) apply(picked, target);
-    else setPicked(here);
+    else if (here.id) { setPicked(here); if (here.id) onInspect?.(here.id); }
   };
 
   const dragProps = (src: WheelSource<T>) => ({
@@ -158,16 +179,16 @@ export function WheelEditor<T extends string>({
         <div className="weWheel" style={{ width: SIZE, height: SIZE }}>
           <svg viewBox={`0 0 ${SIZE} ${SIZE}`} width={SIZE} height={SIZE}>
             {wheel.map((id, i) => (
-              <path key={i} d={wedgePath(i)} className={`weWedge${hot === i ? ' hot' : ''}`} {...dropProps(i)}
+              <path key={i} d={wedgePath(i, wheel.length)} className={`weWedge${hot === i ? ' hot' : ''}`} {...dropProps(i)}
                 onClick={() => clickTarget(i, { from: 'slot', id, slot: i })} />
             ))}
           </svg>
           {wheel.map((id, i) => {
-            const a = (i * Math.PI) / 4;
-            const label = t.wheelSlotLabel(t.slotNames[i], name(id));
+            const a = (i * Math.PI * 2) / wheel.length;
+            const label = t.wheelSlotLabel(wheel.length === 8 ? t.slotNames[i] : `位置 ${i + 1}`, name(id));
             return (
               <div key={i} role="button" tabIndex={0} aria-label={label} title={label}
-                className={`weSlot${hot === i ? ' hot' : ''}${isPicked((p) => p.from === 'slot' && p.slot === i)}`}
+                className={`weSlot${hot === i ? ' hot' : ''}${isPicked((p) => p.from === 'slot' && p.slot === i && p.id === id)}`}
                 style={{ left: C + R_ICON * Math.sin(a), top: C - R_ICON * Math.cos(a) }}
                 {...dragProps({ from: 'slot', id, slot: i })} {...dropProps(i)}
                 onClick={() => clickTarget(i, { from: 'slot', id, slot: i })}
@@ -178,20 +199,21 @@ export function WheelEditor<T extends string>({
               </div>
             );
           })}
-          <div role="button" tabIndex={0} aria-label={t.wheelCenterLabel(trigger, name(center))}
+          <div role={centerArt ? 'img' : 'button'} tabIndex={centerArt ? undefined : 0} aria-label={centerArt ? 'ViGo 小猫' : t.wheelCenterLabel(trigger, name(center))}
             title={t.wheelCenterLabel(trigger, name(center))}
             className={`weCenter${hot === 'center' ? ' hot' : ''}${centerOn ? '' : ' off'}${isPicked((p) => p.from === 'center')}`}
-            {...dragProps({ from: 'center', id: center })} {...dropProps('center')}
-            onClick={() => clickTarget('center', { from: 'center', id: center })}
-            onKeyDown={activate(() => clickTarget('center', { from: 'center', id: center }))}>
-            <img key={center} src={centerIcon || icon(center)} alt="" />
-            {centerIcon ? null : <span>{t.wheelCenter}</span>}
+            {...(!centerArt ? dragProps({ from: 'center', id: center }) : {})} {...(!centerArt ? dropProps('center') : {})}
+            onClick={centerArt ? undefined : () => clickTarget('center', { from: 'center', id: center })}
+            onKeyDown={centerArt ? undefined : activate(() => clickTarget('center', { from: 'center', id: center }))}>
+            <>{centerArt ?? <img key={center} src={icon(center)} alt="" />}</>
+            {centerArt ? null : <span>{t.wheelCenter}</span>}
           </div>
         </div>
         <div className={`wePool${filesOver ? ' filesOver' : ''}`} {...fileDropProps}>
+          {inspector ?? <>
           <div className="wePoolTitle">{labels.poolTitle}</div>
           <span className="desc">{labels.poolDesc}</span>
-          <div className="weTiles">
+          <div className="weTiles" ref={tiles}>
             {pool.filter((p) => !visibleIds || visibleIds.has(p.id)).map((p) => {
               const slot = wheel.indexOf(p.id);
               const pick = () => {
@@ -199,15 +221,16 @@ export function WheelEditor<T extends string>({
                 setPicked((cur) => (cur?.from === 'pool' && cur.id === p.id ? null : { from: 'pool', id: p.id }));
               };
               return (
-                <div key={p.id} className={`weCell${p.onRemove ? ' removable' : ''}`}>
+                <div key={p.id} data-pool-id={p.id} className={`weCell${p.onRemove ? ' removable' : ''}`}>
                   <div role="button" tabIndex={0}
+                    title={p.name}
                     className={`weTile${isPicked((s) => s.from === 'pool' && s.id === p.id)}`}
                     {...dragProps({ from: 'pool', id: p.id })} onClick={pick} onKeyDown={activate(pick)}
 >
                     {p.badge ? <span className="weNew">{p.badge}</span> : null}
-                    {slot >= 0 ? <span className="weWhere">{t.slotNames[slot]}</span> : null}
+                    {slot >= 0 ? <span className="weWhere">{wheel.length === 8 ? t.slotNames[slot] : `${slot + 1}`}</span> : null}
                     <img src={p.icon} alt="" />
-                    {p.name}
+                    <span className="weTileName">{p.name}</span>
                   </div>
                   {p.tool ? (
                     <button type="button" className={`weTool${p.tool.on ? ' on' : ''}`} aria-label={p.tool.label} title={p.tool.label}
@@ -226,6 +249,7 @@ export function WheelEditor<T extends string>({
             })}
           </div>
           {poolExtra}
+          </>}
         </div>
       </div>
       <div className="weHint" aria-live="polite">{picked ? t.wheelPickHint(name(picked.id)) : '拖动软件图标到轮盘，或点击图标后点击槽位'}</div>

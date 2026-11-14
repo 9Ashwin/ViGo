@@ -53,6 +53,14 @@ export function KeyCapture(props: {
     if (cancelled && wasListening) props.onCancel?.();
   };
 
+  useEffect(() => {
+    const cancel = () => { if (listeningRef.current) finish(true); };
+    const visibility = () => { if (document.hidden) cancel(); };
+    window.addEventListener('blur', cancel); document.addEventListener('visibilitychange', visibility);
+    const off = api.onCaptureCancelled(cancel);
+    return () => { window.removeEventListener('blur', cancel); document.removeEventListener('visibilitychange', visibility); off(); };
+  }, [props.onCancel]);
+
   const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (!listening) return;
     e.preventDefault();

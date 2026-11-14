@@ -1,9 +1,12 @@
+import type { BrowserTab } from '../shared/content';
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { Settings } from '../shared/settings';
 
 export interface InstalledApp {
   name: string;
   path: string;
+  aliases?: string[];
+  browser?: boolean;
 }
 
 export interface SettingsState {
@@ -13,6 +16,7 @@ export interface SettingsState {
   maxSlots: number;
   helperVersion: number;
   staleAccess: boolean;
+  capturing: boolean;
   screenPermission: boolean;
   installed?: InstalledApp[];
 }
@@ -25,10 +29,14 @@ const api = {
   previewWheel: (page = 0): Promise<void> => ipcRenderer.invoke('settings:preview-wheel', page),
   quit: (): Promise<void> => ipcRenderer.invoke('settings:quit'),
   requestWindowPreview: (): Promise<SettingsState> => ipcRenderer.invoke('settings:window-preview-permission'),
-  shortcuts: (): Promise<InstalledApp[]> => ipcRenderer.invoke('settings:shortcuts'),
+  tabs: (owner: string): Promise<BrowserTab[]> => ipcRenderer.invoke('settings:tabs', owner),
   browse: (): Promise<string[]> => ipcRenderer.invoke('settings:browse'),
   setCapturing: (on: boolean): Promise<void> => ipcRenderer.invoke('settings:capturing', on),
   filePaths: (files: File[]): string[] => files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),
+  onCaptureCancelled: (cb: () => void): (() => void) => {
+    const listener = () => cb(); ipcRenderer.on('capture:cancel', listener);
+    return () => { ipcRenderer.removeListener('capture:cancel', listener); };
+  },
   onChange: (cb: (s: SettingsState) => void): (() => void) => {
     const listener = (_e: unknown, s: SettingsState): void => cb(s);
     ipcRenderer.on('settings:changed', listener);
