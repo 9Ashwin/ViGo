@@ -423,7 +423,6 @@ pub fn run() {
         );
         let root = native("NSView", r(0., 0., 800., 800.));
         let canvas = Canvas::new(r(0., 0., 800., 800.));
-        canvas.setWantsLayer(true);
         root.addSubview(&canvas);
         overlay.setContentView(Some(&root));
         let status = NSStatusBar::systemStatusBar().statusItemWithLength(-1.);

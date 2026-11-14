@@ -37,8 +37,6 @@ impl State {
     pub(super) unsafe fn draw_wheel(&self) {
         let (cx, cy) = self.center;
         let ink = color("labelColor");
-        NSColor::clearColor().setFill();
-        NSRectFillUsingOperation(self.canvas.bounds(), NSCompositingOperation::Copy);
         self.draw_tether();
         // Let the system glass and icon artwork carry the interface; selection has no colored tile.
         let shadow = NSShadow::new();
