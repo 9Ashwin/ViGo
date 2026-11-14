@@ -1,0 +1,48 @@
+name: Native builds
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  macos:
+    name: macOS Apple Silicon
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Checks
+        run: |
+          cargo fmt --check
+          cargo test --locked
+          cargo clippy --locked --all-features -- -D warnings
+      - name: Build app
+        env:
+          VIGO_SIGN_IDENTITY: '-'
+        run: sh tools/native/bundle.sh
+      - name: Verify and archive
+        run: |
+          codesign --verify --deep --strict release/native/ViGo.app
+          test ! -d release/native/ViGo.app/Contents/Frameworks
+          ditto -c -k --sequesterRsrc --keepParent release/native/ViGo.app release/ViGo-macOS-arm64-ci.zip
+          unzip -t release/ViGo-macOS-arm64-ci.zip
+          echo 'CI testing build: ad-hoc signed, not notarized. Local installed updates use your fixed signing identity.' > release/CI-BUILD-NOTICE.txt
+          shasum -a 256 release/ViGo-macOS-arm64-ci.zip > release/SHA256SUMS.txt
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ViGo-macOS-arm64
+          path: |
+            release/ViGo-macOS-arm64-ci.zip
+            release/CI-BUILD-NOTICE.txt
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

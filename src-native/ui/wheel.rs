@@ -36,8 +36,7 @@ impl State {
     }
     pub(super) unsafe fn draw_wheel(&self) {
         let (cx, cy) = self.center;
-        let size = self.render_size;
-        let radius = size * 188. / 600.;
+        let radius = self.ring.surface;
         let ink = color("labelColor");
         let secondary = color("secondaryLabelColor");
         let border = NSBezierPath::bezierPathWithOvalInRect(rect(r(
@@ -251,7 +250,7 @@ impl State {
         }
     }
     pub(super) unsafe fn sync_glass(&mut self) {
-        let radius = self.ring.outer;
+        let radius = self.ring.surface;
         let mut frames = vec![r(
             self.center.0 - radius,
             self.center.1 - radius,

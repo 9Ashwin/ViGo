@@ -104,6 +104,7 @@ pub struct DockLayout {
     pub icon: f64,
     pub hub: f64,
     pub outer: f64,
+    pub surface: f64,
 }
 impl DockLayout {
     pub fn new(count: usize, base: f64, width: f64, height: f64) -> Self {
@@ -115,77 +116,61 @@ impl DockLayout {
                 icon: preferred,
                 hub,
                 outer: hub + 50.,
+                surface: hub + 50.,
             };
         }
-        let mut chosen = None;
-        let standard_steps = ((preferred - 12.) / 2.).ceil() as usize;
-        for shrink in 0..=standard_steps + 40 {
-            let icon = if shrink <= standard_steps {
-                (preferred - shrink as f64 * 2.).max(12.)
-            } else {
-                12. * 0.5f64.powi((shrink - standard_steps) as i32)
-            };
-            let gap = icon * 0.32;
-            let step = icon + 20.;
-            let minimum = hub + icon / 2. + 18.;
-            let maximum = (width.min(height) / 2. - 18. - icon / 2. - 18.).max(minimum);
-            let layers = ((maximum - minimum) / step).floor() as usize + 1;
-            let mut best: Option<(f64, Vec<f64>, Vec<usize>)> = None;
-            for rings in 1..=layers {
-                let target = count as f64 * (icon + gap) / TAU;
-                let mut outer = (target / rings as f64 + (rings - 1) as f64 * step / 2.)
-                    .max(minimum + (rings - 1) as f64 * step)
-                    + 2.;
-                while outer <= maximum + 0.01 {
-                    let radii: Vec<_> = (0..rings)
-                        .map(|i| outer - (rings - 1 - i) as f64 * step)
-                        .collect();
-                    let caps: Vec<_> = radii
-                        .iter()
-                        .map(|r| (TAU * r / (icon + gap)).floor() as usize)
-                        .collect();
-                    if caps.iter().sum::<usize>() >= count {
-                        if best.as_ref().is_none_or(|b| outer < b.0) {
-                            best = Some((outer, radii, caps));
-                        }
-                        break;
-                    }
-                    outer += 1.;
-                }
-            }
-            if let Some((outer, radii, caps)) = best {
-                chosen = Some((icon, outer, radii, caps));
-                break;
-            }
+        // The main glass disc stays compact. Only the first eight Dock items live inside it.
+        let surface = (base * 188. / 600.)
+            .min(width.min(height) / 2. - 20.)
+            .max(hub + 50.);
+        let inner_count = count.min(8);
+        let inner_radius = (base * 0.23).min(surface - preferred / 2. - 12.);
+        let mut icon = preferred;
+        let mut rings = vec![(inner_count, inner_radius)];
+        let mut remaining = count - inner_count;
+        let mut radius = surface + preferred / 2. + 18.;
+        let maximum = width.min(height) / 2. - preferred / 2. - 16.;
+        while remaining > 0 && radius <= maximum {
+            let capacity = (TAU * radius / (preferred * 1.35)).floor() as usize;
+            let n = remaining.min(capacity.max(1));
+            rings.push((n, radius));
+            remaining -= n;
+            radius += preferred + 18.;
         }
-        let (icon, outer, radii, caps) = chosen.unwrap_or_else(|| {
-            (
-                12.,
-                width.min(height) / 2. - 40.,
-                vec![width.min(height) / 2. - 40.],
-                vec![count],
-            )
-        });
-        let sum: f64 = radii.iter().sum();
-        let mut counts: Vec<usize> = radii
-            .iter()
-            .zip(&caps)
-            .map(|(r, c)| ((count as f64 * r / sum).floor() as usize).min(*c))
-            .collect();
-        let mut remaining = count - counts.iter().sum::<usize>();
-        while remaining > 0 {
-            for i in (0..counts.len()).rev() {
-                if counts[i] < caps[i] && remaining > 0 {
-                    counts[i] += 1;
-                    remaining -= 1;
-                }
+        if remaining > 0 {
+            // Dense Docks keep every item visible by fitting overflow rings, never enlarging the glass.
+            rings.truncate(1);
+            let available = (maximum - surface).max(20.);
+            let overflow = count - inner_count;
+            let layers = (available / (preferred + 14.)).floor().max(1.) as usize;
+            let capacity_radius = (1..=layers)
+                .map(|i| surface + available * i as f64 / layers as f64)
+                .sum::<f64>();
+            icon = preferred
+                .min(TAU * capacity_radius / (overflow as f64 * 1.25))
+                .max(1.);
+            let mut left = overflow;
+            for i in 1..=layers {
+                let r = surface + available * i as f64 / layers as f64;
+                let n = if i == layers {
+                    left
+                } else {
+                    ((overflow as f64 * r / capacity_radius).floor() as usize).min(left)
+                };
+                rings.push((n, r));
+                left -= n;
             }
         }
         let mut nodes = vec![];
-        for (ring, (&radius, &n)) in radii.iter().zip(&counts).enumerate() {
+        let mut outer = surface;
+        for (ring, (n, r)) in rings.into_iter().enumerate() {
+            if n == 0 {
+                continue;
+            }
+            outer = outer.max(r + icon / 2. + 12.);
             for offset in 0..n {
                 nodes.push(DockNode {
-                    radius,
+                    radius: r,
                     angle: -PI / 2. + offset as f64 * TAU / n as f64,
                     ring,
                     offset,
@@ -197,7 +182,8 @@ impl DockLayout {
             nodes,
             icon,
             hub,
-            outer: outer + icon / 2. + 18.,
+            outer,
+            surface,
         }
     }
     pub fn hit(&self, x: f64, y: f64, previous: Option<usize>) -> Option<usize> {
