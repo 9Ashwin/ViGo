@@ -1,0 +1,61 @@
+/* Application settings shell and launcher-specific controls. */
+.sidebarFoot { margin-top: auto; padding: 20px 8px 10px; color: var(--mac-sub); font-size: 11px; }
+.sidebarFoot small { display: block; margin: 10px 0 0; max-width: 160px; line-height: 1.5; }
+.connectionDot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #ff9f0a; }
+.connectionDot.ready { background: #30b45b; }
+.sectionToolbar, .catalogToolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.sectionToolbar small { margin-left: 6px; font-weight: 400; color: var(--mac-sub); }
+.catalogToolbar { margin: 10px 0; }
+.pageTabs { display: flex; gap: 6px; margin-bottom: 10px; }
+[data-platform="mac"] .card.wheelEditor { border-radius: 12px; padding: 18px; }
+.weBody { gap: 18px; grid-template-columns: 300px minmax(0, 1fr); }
+.weTiles { max-height: 312px; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); }
+.weCenter { pointer-events: none; }
+.weCenter.off { opacity: 1; }
+.weCenter img:not([src]), .weCenter img[src=""], .weSlot img:not([src]), .weSlot img[src=""] { display: none; }
+.weCenter span { font: 700 34px -apple-system, sans-serif; color: #4fc3eb; }
+.weSlot:has(img:not([src]))::after { content: '+'; color: #8294a4; font-size: 20px; opacity: .6; }
+.pinnedGroup { border-radius: 10px; overflow: hidden; background: var(--mac-row); box-shadow: 0 0 0 .5px var(--mac-sep); }
+.pinRow { display: flex; align-items: center; gap: 12px; padding: 8px 12px; min-height: 48px; }
+.pinRow + .pinRow { border-top: .5px solid var(--mac-sep); }
+.pinRow img { width: 28px; height: 28px; object-fit: contain; }
+.pinRow > .fui-Input { flex: 1; }
+.pinRow .desc { min-width: 64px; text-align: right; }
+.inlineError { display: flex; align-items: center; justify-content: space-between; padding: 10px; margin-bottom: 12px; background: #ff9f0a20; border-radius: 10px; }
+.aboutLogo { width: 48px; height: 48px; }
+kbd { padding: 3px 8px; border-radius: 5px; background: var(--mac-sel); font: 500 12px -apple-system, sans-serif; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+/* Restrained settings shell: narrow neutral navigation, compact header and separated content groups. */
+[data-platform="mac"] { --mac-content: #fafafa; --mac-row: #fff; --mac-sep: rgba(24,24,27,.09); --mac-sub: #71717a; --mac-sel: #e9e9ed; }
+[data-platform="mac"][data-theme="dark"] { --mac-content: #101012; --mac-row: #19191c; --mac-sep: rgba(255,255,255,.08); --mac-sub: #98989f; --mac-sel: #2a2a2f; --mac-track: #34343a; }
+[data-platform="mac"] nav.side { background: #f1f1f4; padding: 58px 12px 14px; }
+[data-platform="mac"][data-theme="dark"] nav.side { background: #18181b; }
+[data-platform="mac"] .brand { padding: 6px 10px 28px; gap: 10px; }
+[data-platform="mac"] .brand img { width: 30px; height: 30px; }
+[data-platform="mac"] .brand b { font-size: 15px; letter-spacing: -.3px; }
+[data-platform="mac"] .brand .desc { font-size: 10px; }
+[data-platform="mac"] .navItem { height: 34px; margin-bottom: 2px; font-size: 12px; padding: 0 10px; border-radius: 7px; }
+[data-platform="mac"] .navItem svg { background: transparent !important; color: var(--mac-sub); padding: 1px; width: 18px; height: 18px; }
+[data-platform="mac"] .navItem.sel { background: var(--mac-sel); color: inherit; font-weight: 600; }
+[data-platform="mac"] .navItem:hover { background: var(--mac-sel); }
+[data-platform="mac"] .navItem.sel svg { color: #218dbd; }
+[data-platform="mac"] .titlebar { height: 48px; font-size: 12px; font-weight: 500; padding: 0 30px; color: var(--mac-sub); }
+[data-platform="mac"] main.content { margin-top: 48px; padding: 24px 30px 40px; }
+[data-platform="mac"] .card.status { padding: 14px 16px; border-radius: 12px; gap: 12px; }
+[data-platform="mac"] .statusPing { width: 36px; height: 36px; filter: none; }
+[data-platform="mac"] .card.status b { font-size: 15px !important; }
+[data-platform="mac"] .section { padding-left: 1px; font-size: 13px; margin-top: 24px; }
+[data-platform="mac"] .card.wheelEditor { border: 1px solid var(--mac-sep); box-shadow: none; padding: 16px; }
+.weWedge { stroke: #68758c; stroke-opacity: .35; fill: #252b34; }
+.weCenter { border-color: #68758c70; }
+[data-platform="mac"] .weHead .lbl { font-size: 12px; font-weight: 600; }
+[data-platform="mac"] .weHead .desc { font-weight: 400; }
+.weSlot img { width: 42px; height: 42px; }
+[data-platform="mac"] .weTile { padding: 9px 4px 7px; font-size: 10.5px; }
+.weTile img { width: 32px; height: 32px; }
+.catalogToolbar { margin-top: 18px; }
+.pageTabs { margin: 12px 0; }
+[data-platform="mac"] .card:not(.status):not(.wheelEditor):not(.permission) { min-height: 56px; padding: 12px 16px; }
+
+.weCenter img { width: 76px; height: 76px; object-fit: contain; }
+[data-platform="mac"][data-theme] { --text3: var(--mac-sub); }

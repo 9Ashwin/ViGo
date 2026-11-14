@@ -1,0 +1,11 @@
+node_modules/
+out/
+release/
+native/hook-helper/build/
+.DS_Store
+*.log
+.idea/
+tasks/
+
+.local/
+native/system-helper/build/
