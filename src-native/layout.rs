@@ -11,30 +11,6 @@ impl Rect {
         x >= self.x && x <= self.x + self.w && y >= self.y && y <= self.y + self.h
     }
 }
-pub fn slot(dx: f64, dy: f64, count: usize, size: f64) -> Option<usize> {
-    if count == 0 || dx.hypot(dy) < size * 86. / 600. || dx.hypot(dy) > size * 0.6 {
-        return None;
-    }
-    Some(
-        (((dy.atan2(dx) + PI / 2. + TAU + PI / count as f64) % TAU) / TAU * count as f64).floor()
-            as usize
-            % count,
-    )
-}
-pub fn icon(cx: f64, cy: f64, i: usize, count: usize, size: f64) -> (f64, f64) {
-    let a = -PI / 2. + TAU * i as f64 / count as f64;
-    (cx + a.cos() * size * 0.23, cy + a.sin() * size * 0.23)
-}
-pub fn editor_slot(x: f64, y: f64, count: usize) -> Option<usize> {
-    (0..count)
-        .map(|i| {
-            let (ix, iy) = icon(165., 155., i, count, 440.);
-            (i, (x - ix).hypot(y - iy))
-        })
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .filter(|(_, d)| *d <= 31.)
-        .map(|(i, _)| i)
-}
 pub fn content(
     cx: f64,
     cy: f64,
@@ -96,79 +72,9 @@ pub fn content(
         })
         .collect()
 }
-/// Prefer the opposite side, then free corners; never cover an outer entry or the cancel hub.
-pub fn preview(cx: f64, cy: f64, size: f64, w: f64, h: f64, chips: &[Rect]) -> Option<Rect> {
-    let radius = size * 188. / 600.;
-    let left = cx - radius - 260.;
-    let right = cx + radius + 20.;
-    let side = if chips.first().is_some_and(|r| r.x > cx) {
-        left
-    } else {
-        right
-    };
-    let candidates = [
-        (side, cy - 94.),
-        (side, cy - radius - 210.),
-        (side, cy + radius + 20.),
-        (8., 40.),
-        (w - 248., 40.),
-        (8., h - 196.),
-        (w - 248., h - 196.),
-    ];
-    let circle = Rect {
-        x: cx - radius - 8.,
-        y: cy - radius - 8.,
-        w: radius * 2. + 16.,
-        h: radius * 2. + 16.,
-    };
-    let overlaps = |a: Rect, b: Rect| {
-        a.x < b.x + b.w + 8. && a.x + a.w + 8. > b.x && a.y < b.y + b.h + 8. && a.y + a.h + 8. > b.y
-    };
-    candidates
-        .into_iter()
-        .map(|(x, y)| Rect {
-            x,
-            y,
-            w: 240.,
-            h: 188.,
-        })
-        .find(|r| {
-            r.x >= 8.
-                && r.y >= 8.
-                && r.x + r.w <= w - 8.
-                && r.y + r.h <= h - 8.
-                && !overlaps(*r, circle)
-                && chips.iter().all(|c| !overlaps(*r, *c))
-        })
-}
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn preview_does_not_cover_large_lists() {
-        let chips = content(700., 450., 520., 38, 1470., 956., true);
-        let p = preview(700., 450., 520., 1470., 956., &chips).expect("Room in a free corner");
-        for c in chips {
-            assert!(p.x + p.w <= c.x || p.x >= c.x + c.w || p.y + p.h <= c.y || p.y >= c.y + c.h);
-        }
-    }
-    #[test]
-    fn editor_only_hits_actual_slots() {
-        for count in 4..=12 {
-            assert_eq!(editor_slot(165., 155., count), None);
-            assert_eq!(editor_slot(0., 0., count), None);
-            for i in 0..count {
-                let (x, y) = icon(165., 155., i, count, 440.);
-                assert_eq!(editor_slot(x, y, count), Some(i));
-            }
-        }
-    }
-    #[test]
-    fn directions_and_cancel() {
-        assert_eq!(slot(120., 0., 8, 520.), Some(2));
-        assert_eq!(slot(0., 0., 8, 520.), None);
-        assert_eq!(slot(0., -120., 4, 520.), Some(0));
-    }
     #[test]
     fn labels_visible_and_avoid_hub() {
         for count in [1, 9, 24, 36, 60, 120] {
@@ -179,6 +85,212 @@ mod tests {
                     assert!(r.x >= 0. && r.y >= 0. && r.x + r.w <= 1470. && r.y + r.h <= 956.);
                     assert!(!r.has(cx, 450.));
                 }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DockNode {
+    pub radius: f64,
+    pub angle: f64,
+    pub ring: usize,
+    pub offset: usize,
+    pub count: usize,
+}
+#[derive(Clone, Debug)]
+pub struct DockLayout {
+    pub nodes: Vec<DockNode>,
+    pub icon: f64,
+    pub hub: f64,
+    pub outer: f64,
+}
+impl DockLayout {
+    pub fn new(count: usize, base: f64, width: f64, height: f64) -> Self {
+        let preferred = (base * 0.088).clamp(36., 54.);
+        let hub = (base * 0.135).clamp(56., 84.);
+        if count == 0 {
+            return Self {
+                nodes: vec![],
+                icon: preferred,
+                hub,
+                outer: hub + 50.,
+            };
+        }
+        let mut chosen = None;
+        let standard_steps = ((preferred - 12.) / 2.).ceil() as usize;
+        for shrink in 0..=standard_steps + 40 {
+            let icon = if shrink <= standard_steps {
+                (preferred - shrink as f64 * 2.).max(12.)
+            } else {
+                12. * 0.5f64.powi((shrink - standard_steps) as i32)
+            };
+            let gap = icon * 0.32;
+            let step = icon + 20.;
+            let minimum = hub + icon / 2. + 18.;
+            let maximum = (width.min(height) / 2. - 18. - icon / 2. - 18.).max(minimum);
+            let layers = ((maximum - minimum) / step).floor() as usize + 1;
+            let mut best: Option<(f64, Vec<f64>, Vec<usize>)> = None;
+            for rings in 1..=layers {
+                let target = count as f64 * (icon + gap) / TAU;
+                let mut outer = (target / rings as f64 + (rings - 1) as f64 * step / 2.)
+                    .max(minimum + (rings - 1) as f64 * step)
+                    + 2.;
+                while outer <= maximum + 0.01 {
+                    let radii: Vec<_> = (0..rings)
+                        .map(|i| outer - (rings - 1 - i) as f64 * step)
+                        .collect();
+                    let caps: Vec<_> = radii
+                        .iter()
+                        .map(|r| (TAU * r / (icon + gap)).floor() as usize)
+                        .collect();
+                    if caps.iter().sum::<usize>() >= count {
+                        if best.as_ref().is_none_or(|b| outer < b.0) {
+                            best = Some((outer, radii, caps));
+                        }
+                        break;
+                    }
+                    outer += 1.;
+                }
+            }
+            if let Some((outer, radii, caps)) = best {
+                chosen = Some((icon, outer, radii, caps));
+                break;
+            }
+        }
+        let (icon, outer, radii, caps) = chosen.unwrap_or_else(|| {
+            (
+                12.,
+                width.min(height) / 2. - 40.,
+                vec![width.min(height) / 2. - 40.],
+                vec![count],
+            )
+        });
+        let sum: f64 = radii.iter().sum();
+        let mut counts: Vec<usize> = radii
+            .iter()
+            .zip(&caps)
+            .map(|(r, c)| ((count as f64 * r / sum).floor() as usize).min(*c))
+            .collect();
+        let mut remaining = count - counts.iter().sum::<usize>();
+        while remaining > 0 {
+            for i in (0..counts.len()).rev() {
+                if counts[i] < caps[i] && remaining > 0 {
+                    counts[i] += 1;
+                    remaining -= 1;
+                }
+            }
+        }
+        let mut nodes = vec![];
+        for (ring, (&radius, &n)) in radii.iter().zip(&counts).enumerate() {
+            for offset in 0..n {
+                nodes.push(DockNode {
+                    radius,
+                    angle: -PI / 2. + offset as f64 * TAU / n as f64,
+                    ring,
+                    offset,
+                    count: n,
+                });
+            }
+        }
+        Self {
+            nodes,
+            icon,
+            hub,
+            outer: outer + icon / 2. + 18.,
+        }
+    }
+    pub fn hit(&self, x: f64, y: f64, previous: Option<usize>) -> Option<usize> {
+        let radius = x.hypot(y);
+        if radius < self.hub || radius > self.outer + 70. {
+            return None;
+        }
+        let node = self.nodes.iter().min_by(|a, b| {
+            (radius - a.radius)
+                .abs()
+                .total_cmp(&(radius - b.radius).abs())
+        })?;
+        let angle = y.atan2(x);
+        let offset = (((angle + PI / 2. + TAU + PI / node.count as f64) % TAU) / TAU
+            * node.count as f64)
+            .floor() as usize
+            % node.count;
+        let candidate = self
+            .nodes
+            .iter()
+            .position(|n| n.ring == node.ring && n.offset == offset)?;
+        if let Some(old) = previous.and_then(|i| self.nodes.get(i).map(|n| (i, n))) {
+            if old.1.ring != node.ring
+                && (radius - old.1.radius).abs() < (radius - node.radius).abs() + 5.
+            {
+                return Some(old.0);
+            }
+            let d = (angle - old.1.angle)
+                .sin()
+                .atan2((angle - old.1.angle).cos())
+                .abs();
+            if old.1.ring == node.ring
+                && d <= PI / node.count as f64 + (PI / 60.).min(PI / node.count as f64 * 0.12)
+            {
+                return Some(old.0);
+            }
+        }
+        Some(candidate)
+    }
+    pub fn center(&self, anchor: (f64, f64), width: f64, height: f64) -> (f64, f64) {
+        let margin = self.outer + 8.;
+        (
+            anchor.0.clamp(margin, width - margin),
+            anchor.1.clamp(margin, height - margin),
+        )
+    }
+}
+#[cfg(test)]
+mod dock_layout_tests {
+    use super::*;
+    #[test]
+    fn every_dock_item_is_present_and_hittable() {
+        for count in [1, 8, 18, 30, 60, 100, 180] {
+            let l = DockLayout::new(count, 520., 1470., 956.);
+            assert_eq!(l.nodes.len(), count);
+            assert!(l.outer < 478.);
+            for (i, n) in l.nodes.iter().enumerate() {
+                assert_eq!(
+                    l.hit(n.angle.cos() * n.radius, n.angle.sin() * n.radius, None),
+                    Some(i)
+                );
+            }
+        }
+    }
+    #[test]
+    fn dense_docks_keep_multiple_rings_and_spacing() {
+        for (count, w, h) in [(500, 1024., 768.), (180, 640., 480.)] {
+            let l = DockLayout::new(count, 640., w, h);
+            assert_eq!(l.nodes.len(), count);
+            assert!(l.nodes.last().unwrap().ring > 0);
+            for (i, a) in l.nodes.iter().enumerate() {
+                for b in l.nodes.iter().skip(i + 1) {
+                    let d = (a.radius * a.angle.cos() - b.radius * b.angle.cos())
+                        .hypot(a.radius * a.angle.sin() - b.radius * b.angle.sin());
+                    assert!(d >= l.icon, "overlapping dense Dock icons");
+                }
+            }
+        }
+    }
+    #[test]
+    fn edge_layout_keeps_all_icons_visible() {
+        let l = DockLayout::new(30, 520., 1470., 956.);
+        for anchor in [(5., 450.), (1465., 950.), (5., 5.)] {
+            let (c, d) = l.center(anchor, 1470., 956.);
+            for n in &l.nodes {
+                let x = c + n.radius * n.angle.cos();
+                let y = d + n.radius * n.angle.sin();
+                assert!(
+                    x - l.icon / 2. >= 0.
+                        && x + l.icon / 2. <= 1470.
+                        && y - l.icon / 2. >= 0.
+                        && y + l.icon / 2. <= 956.
+                );
             }
         }
     }

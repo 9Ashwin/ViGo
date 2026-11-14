@@ -1,19 +1,17 @@
-//! AppKit is confined to this module and the main thread. Workers communicate by owned messages.
-mod controls;
-mod settings;
+//! All AppKit state stays on the main thread; Dock and window queries run in isolated workers.
+mod menu;
 mod wheel;
-
 use crate::{
     input::{self, Effect, Gesture},
     layout::{self, Rect},
-    model::{Content, Pin, Settings, Tab, Trigger, Window},
-    platform::{self, AppInfo, Message},
+    model::{Content, Settings, Tab, Trigger, Window},
+    platform::{self, Message},
 };
 use objc2::{
     define_class, msg_send,
     rc::{Allocated, Retained},
     runtime::{AnyClass, AnyObject, ProtocolObject},
-    sel, AllocAnyThread, ClassType, DefinedClass, MainThreadOnly,
+    sel, AllocAnyThread, ClassType, MainThreadOnly,
 };
 use objc2_app_kit::*;
 use objc2_foundation::*;
@@ -23,13 +21,12 @@ use std::{
     ffi::{c_void, CString},
     ptr,
     sync::mpsc::{self, Receiver, Sender},
-    time::Instant,
+    time::{Instant, SystemTime},
 };
-
 thread_local! {static UI:RefCell<Option<State>>=const{RefCell::new(None)};}
 fn with(f: impl FnOnce(&mut State)) {
-    UI.with(|cell| {
-        if let Ok(mut s) = cell.try_borrow_mut() {
+    UI.with(|c| {
+        if let Ok(mut s) = c.try_borrow_mut() {
             if let Some(s) = s.as_mut() {
                 f(s);
             }
@@ -48,10 +45,6 @@ unsafe fn class(name: &str) -> &'static AnyClass {
 unsafe fn native(name: &str, frame: Rect) -> Retained<NSView> {
     let v: Allocated<NSView> = msg_send![class(name), alloc];
     msg_send![v,initWithFrame:rect(frame)]
-}
-unsafe fn string(v: &NSView) -> String {
-    let t: Retained<NSString> = msg_send![v, stringValue];
-    t.to_string()
 }
 unsafe fn color(name: &str) -> Retained<NSColor> {
     let selector = objc2::runtime::Sel::register(&CString::new(name).unwrap());
@@ -110,85 +103,45 @@ unsafe fn label(parent: &NSView, value: &str, frame: Rect, size: f64, bold: bool
     })));
     parent.addSubview(&v);
 }
-unsafe fn clear(parent: &NSView) {
-    for child in parent.subviews() {
-        child.removeFromSuperview();
-    }
-}
-
-define_class!(
-    #[unsafe(super(NSView))]
-    #[thread_kind=MainThreadOnly]
-    #[ivars=usize]
-    struct Canvas;
-    impl Canvas {
-        #[unsafe(method(isFlipped))] fn flipped(&self)->bool{true}
-        #[unsafe(method(drawRect:))] fn draw(&self,_rect:NSRect){with(|s|unsafe{if *self.ivars()==0{s.draw_wheel()}else{s.draw_editor(self)}});}
-        #[unsafe(method(mouseDown:))] fn mouse(&self,event:&NSEvent){if *self.ivars()==1{let p=self.convertPoint_fromView(event.locationInWindow(),None);with(|s|{s.drag_from=s.editor_click(p.x,p.y);s.drag_to=None;});self.setNeedsDisplay(true);}}
-        #[unsafe(method(mouseDragged:))] fn dragged(&self,event:&NSEvent){if *self.ivars()==1{let p=self.convertPoint_fromView(event.locationInWindow(),None);with(|s|{s.drag_to=layout::editor_slot(p.x,p.y,s.settings.slots_per_page).map(|i|s.page*s.settings.slots_per_page+i);});self.setNeedsDisplay(true);}}
-        #[unsafe(method(mouseUp:))] fn mouse_up(&self,_event:&NSEvent){let _keep=unsafe{Retained::retain(self as *const Self as *mut Self)};if *self.ivars()==1{with(|s|unsafe{if let (Some(a),Some(b))=(s.drag_from.take(),s.drag_to.take()){s.settings.wheel.swap(a,b);s.edit_slot=b;s.save();}s.settings_page();});}}
-        #[unsafe(method(draggingEntered:))] fn drag_enter(&self,_sender:&AnyObject)->usize{if *self.ivars()==1{1}else{0}}
-        #[unsafe(method(performDragOperation:))] fn file_drop(&self,sender:&AnyObject)->objc2::runtime::Bool {
-            let _keep=unsafe{Retained::retain(self as *const Self as *mut Self)};
-            if *self.ivars()!=1{return false.into()}
-            unsafe {let pasteboard:Retained<AnyObject>=msg_send![sender,draggingPasteboard];let classes:Retained<AnyObject>=msg_send![class("NSArray"),arrayWithObject:NSURL::class()];let urls:Option<Retained<NSArray<NSURL>>>=msg_send![&*pasteboard,readObjectsForClasses:&*classes,options:ptr::null::<AnyObject>()];let point:NSPoint=msg_send![sender,draggingLocation];let p=self.convertPoint_fromView(point,None);let paths:Vec<String>=urls.into_iter().flat_map(|urls|urls.iter().filter_map(|u|u.path().map(|p|p.to_string())).collect::<Vec<_>>()).collect();let mut accepted=false;with(|s|{let target=s.editor_click(p.x,p.y).or_else(||s.settings.wheel.iter().position(|p|p.is_empty()));if let Some(target)=target{s.edit_slot=target;accepted=s.add_paths(paths);}else{s.notice="轮盘已满，请拖到要替换的位置".into();}});accepted.into()}
-        }
-
-    }
-);
+define_class!(#[unsafe(super(NSView))]#[thread_kind=MainThreadOnly]struct Canvas;impl Canvas{#[unsafe(method(isFlipped))]fn flipped(&self)->bool{true}#[unsafe(method(drawRect:))]fn draw(&self,_r:NSRect){with(|s|unsafe{s.draw_wheel()});}});
 impl Canvas {
-    unsafe fn new(kind: usize, frame: Rect) -> Retained<Self> {
-        let v = Self::alloc(MainThreadMarker::new().unwrap()).set_ivars(kind);
-        let v: Retained<Self> = msg_send![super(v),initWithFrame:rect(frame)];
-        if kind == 1 {
-            v.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
-            v.registerForDraggedTypes(&NSArray::from_slice(&[ns_string!("public.file-url")]));
-        }
-        v
+    unsafe fn new(frame: Rect) -> Retained<Self> {
+        let v = Self::alloc(MainThreadMarker::new().unwrap());
+        msg_send![v,initWithFrame:rect(frame)]
     }
 }
-
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[thread_kind=MainThreadOnly]
-    struct Delegate;
-    unsafe impl NSObjectProtocol for Delegate{}
-    unsafe impl NSApplicationDelegate for Delegate {
-        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
-        fn reopen(&self,_app:&NSApplication,_visible:bool)->bool{with(|s|unsafe{s.show_settings()});true}
-        #[unsafe(method(applicationWillTerminate:))] fn quit(&self,_n:&NSNotification){with(|s|s.stop());}
-    }
-    unsafe impl NSWindowDelegate for Delegate {
-        #[unsafe(method(windowShouldClose:))]fn close(&self,window:&NSWindow)->bool{with(|s|unsafe{if s.settings_window.as_ref().is_some_and(|w|std::ptr::eq(&**w,window)){s.capturing=false;s.hide_settings();}else{window.orderOut(None);}});false}
-        #[unsafe(method(windowDidEndLiveResize:))]fn resized(&self,_n:&NSNotification){with(|s|unsafe{s.settings_page()});}
-        #[unsafe(method(windowDidResignKey:))]fn resign(&self,_n:&NSNotification){with(|s|{if s.capturing{s.capturing=false;unsafe{s.settings_page();}}});}
-    }
-    impl Delegate {
-        #[unsafe(method(action:))]fn action(&self,sender:&AnyObject){let tag:isize=unsafe{msg_send![sender,tag]};let popup=UI.with(|cell|{let Ok(state)=cell.try_borrow()else{return None};state.as_ref().filter(|s|tag==0&&s.app.currentEvent().is_some_and(|e|e.r#type()==NSEventType::RightMouseUp)).map(|s|(s.status.clone(),s.status_menu.clone()))});if let Some((status,menu))=popup{#[allow(deprecated)]status.popUpStatusItemMenu(&menu);return;}with(|s|unsafe{s.action(tag,sender)});}
-        #[unsafe(method(tick:))]fn tick(&self,_timer:&NSTimer){with(|s|unsafe{s.tick()});}
-    }
+define_class!(#[unsafe(super(NSObject))]#[thread_kind=MainThreadOnly]struct Delegate;
+ unsafe impl NSObjectProtocol for Delegate{}
+ unsafe impl NSApplicationDelegate for Delegate{
+  #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]fn reopen(&self,_a:&NSApplication,_v:bool)->bool{open_menu();true}
+  #[unsafe(method(applicationWillTerminate:))]fn quit(&self,_n:&NSNotification){with(|s|s.stop());}
+ }
+ unsafe impl NSMenuDelegate for Delegate{#[unsafe(method(menuNeedsUpdate:))]fn menu_update(&self,_m:&NSMenu){with(|s|unsafe{s.rebuild_menu()});}}
+ unsafe impl NSWindowDelegate for Delegate{
+  #[unsafe(method(windowShouldClose:))]fn close(&self,w:&NSWindow)->bool{with(|s|{s.capturing=false;w.orderOut(None);});false}
+  #[unsafe(method(windowDidResignKey:))]fn resign(&self,_n:&NSNotification){with(|s|unsafe{if s.capturing{s.capturing=false;s.dismiss_capture();}});}
+ }
+ impl Delegate{
+  #[unsafe(method(action:))]fn action(&self,sender:&AnyObject){let tag:isize=unsafe{msg_send![sender,tag]};with(|s|unsafe{s.action(tag,sender)});}
+  #[unsafe(method(tick:))]fn tick(&self,_t:&NSTimer){with(|s|unsafe{s.tick()});}
+  #[unsafe(method(dockChanged:))]fn dock_changed(&self,n:&NSNotification){let regular=unsafe{n.userInfo().and_then(|d|d.objectForKey(NSWorkspaceApplicationKey)).is_some_and(|a|{let policy:isize=msg_send![&*a,activationPolicy];policy==0})};if regular{with(|s|{s.dock_due=s.now()+0.35;});}}
+ }
 );
-
 struct State {
     app: Retained<NSApplication>,
     delegate: Retained<Delegate>,
     settings: Settings,
-    settings_window: Option<Retained<NSWindow>>,
-    settings_root: Option<Retained<NSView>>,
-    content_root: Option<Retained<NSView>>,
     overlay: Retained<NSWindow>,
     canvas: Retained<Canvas>,
     glasses: Vec<Retained<NSView>>,
     status: Retained<NSStatusItem>,
     status_menu: Retained<NSMenu>,
+    capture_window: Option<Retained<NSWindow>>,
+    menu_dock_label: Option<Retained<NSTextField>>,
     screen_frame: NSRect,
     primary_height: f64,
-    picker: Option<Retained<NSWindow>>,
-    picker_doc: Option<Retained<NSView>>,
-    search: Option<Retained<NSView>>,
     icons: HashMap<String, Retained<NSImage>>,
     sheet: Retained<NSImage>,
-    catalog: Vec<AppInfo>,
     windows: Vec<Window>,
     tabs: Vec<Tab>,
     running: Vec<String>,
@@ -206,12 +159,9 @@ struct State {
     entries: Vec<Content>,
     chips: Vec<Rect>,
     selected_chip: Option<usize>,
-    page: usize,
-    tab: usize,
-    edit_slot: usize,
-    drag_from: Option<usize>,
-    drag_to: Option<usize>,
-    outer_owner: String,
+    ring: layout::DockLayout,
+    anchor: (f64, f64),
+    render_size: f64,
     opened: f64,
     closing: Option<f64>,
     trial: Option<f64>,
@@ -221,7 +171,7 @@ struct State {
     last_motion: f64,
     invocations: usize,
     armed: bool,
-    hover_mix: [f64; 12],
+    hover_mix: Vec<f64>,
     capturing: bool,
     capture_dirty: bool,
     pending_key: platform::Ref,
@@ -229,44 +179,36 @@ struct State {
     trusted: bool,
     tap_attempted: bool,
     locked: bool,
-    preview: Option<platform::Preview>,
-    preview_gen: u64,
-    preview_key: String,
-    preview_start: f64,
-    preview_pending: Option<Window>,
-    preview_image: Option<Retained<NSImage>>,
-    preview_cache: Vec<(String, Retained<NSImage>)>,
-    preview_status: String,
-    preview_title: String,
-    preview_rect: Rect,
     notice: String,
     toast: Option<(Retained<NSWindow>, f64)>,
-    #[cfg(feature = "diagnostics")]
-    diag: Option<std::path::PathBuf>,
-    #[cfg(feature = "diagnostics")]
-    diag_ack: u64,
-    #[cfg(feature = "diagnostics")]
-    preview_frames: u64,
-    #[cfg(feature = "diagnostics")]
-    preview_hashes: std::collections::BTreeSet<u64>,
     wake: platform::Ref,
     effects: Vec<Effect>,
     moved: bool,
     layout_dirty: bool,
-    picker_buttons: Vec<(String, Retained<NSView>)>,
+    dock_observer: platform::Ref,
+    dock_observer_pid: i32,
+    observer_retry: f64,
+    observer_failures: u32,
+    dock_failures: u32,
+    dock_observed: Vec<platform::Ref>,
+    reduce_motion: bool,
+    dock_pending: bool,
+    dock_exact: bool,
+    last_dock: f64,
+    dock_due: f64,
+    dock_stamp: Option<SystemTime>,
+    active_paths: Vec<String>,
+    active_names: std::collections::BTreeMap<String, String>,
+    #[cfg(feature = "diagnostics")]
+    diag: Option<std::path::PathBuf>,
+    #[cfg(feature = "diagnostics")]
+    diag_ack: u64,
 }
-
-unsafe fn frame_view(v: &NSView, f: Rect) {
-    v.setFrame(rect(f));
-}
-
-type NSRetainedPanel = Retained<AnyObject>;
 unsafe fn open_url(url: &str) {
     if let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) {
         NSWorkspace::sharedWorkspace().openURL(&url);
     }
 }
-
 unsafe fn session_locked() -> bool {
     let raw = platform::CGSessionCopyCurrentDictionary();
     if raw.is_null() {
@@ -286,14 +228,17 @@ unsafe fn session_locked() -> bool {
     platform::CFRelease(raw);
     locked
 }
-unsafe fn decode_image(encoded: &str) -> Option<Retained<NSImage>> {
-    let encoded = encoded
-        .strip_prefix("data:image/jpeg;base64,")
-        .or_else(|| encoded.strip_prefix("data:image/png;base64,"))?;
-    let d: Option<Retained<NSData>> = msg_send![NSData::alloc(),initWithBase64EncodedString:&*NSString::from_str(encoded),options:0usize];
-    d.and_then(|data| NSImage::initWithData(NSImage::alloc(), &data))
+extern "C" fn dock_changed(
+    _observer: platform::Ref,
+    _element: platform::Ref,
+    _name: platform::Ref,
+    _info: platform::Ref,
+) {
+    with(|s| unsafe {
+        s.dock_due = s.now();
+        wake(s);
+    });
 }
-
 unsafe fn wake(s: &State) {
     platform::CFRunLoopSourceSignal(s.wake);
     platform::CFRunLoopWakeUp(platform::CFRunLoopGetMain());
@@ -399,7 +344,7 @@ extern "C" fn event_hook(
                 suppress = true;
             }
         } else if kind == 10 || kind == 12 {
-            if kind == 10 && code == 53 && s.gesture.open {
+            if kind == 10 && code == 53 && s.active {
                 s.gesture.cancel();
                 s.effects.push(Effect::Cancel);
                 suppress = true;
@@ -431,25 +376,6 @@ extern "C" fn event_hook(
             s.moved = true;
         }
         if kind == 22 && s.active {
-            let dx = s.pointer.0 - s.center.0;
-            let dy = s.pointer.1 - s.center.1;
-            if s.entries.is_empty() || dx.hypot(dy) < s.settings.wheel_size_px * 0.28 {
-                let delta = platform::CGEventGetIntegerValueField(event, 11);
-                if delta != 0 {
-                    let pages = s.settings.wheel.len().div_ceil(s.settings.slots_per_page);
-                    s.page = if delta < 0 {
-                        (s.page + 1) % pages
-                    } else {
-                        (s.page + pages - 1) % pages
-                    };
-                    s.selected = None;
-                    s.entries.clear();
-                    s.chips.clear();
-                    s.stop_preview();
-                    s.layout_dirty = true;
-                    s.moved = true;
-                }
-            }
             suppress = true;
         }
         if s.gesture.held || s.active || !s.effects.is_empty() || s.capture_dirty || s.moved {
@@ -465,9 +391,22 @@ extern "C" fn event_hook(
 
 #[link(name = "ServiceManagement", kind = "framework")]
 extern "C" {}
+fn open_menu() {
+    let state = UI.with(|c| {
+        let mut state = c.try_borrow_mut().ok()?;
+        let s = state.as_mut()?;
+        unsafe {
+            s.rebuild_menu();
+        }
+        Some((s.status.clone(), s.status_menu.clone()))
+    });
+    if let Some((status, menu)) = state {
+        #[allow(deprecated)]
+        status.popUpStatusItemMenu(&menu);
+    }
+}
 pub fn run() {
     unsafe {
-        // Single instance across native launches. Electron is stopped by the installer before replacement.
         let _ = std::fs::create_dir_all(Settings::path().parent().unwrap());
         let lock = std::fs::OpenOptions::new()
             .create(true)
@@ -481,52 +420,15 @@ pub fn run() {
                 return;
             }
         }
-        let mtm = MainThreadMarker::new().expect("AppKit must start on the main thread");
+        let mtm = MainThreadMarker::new().unwrap();
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         let delegate: Retained<Delegate> = msg_send![Delegate::alloc(mtm), init];
         app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-        let main_menu = NSMenu::new(mtm);
-        for (heading, commands) in [
-            (
-                "ViGo",
-                vec![
-                    ("关于 ViGo", sel!(orderFrontStandardAboutPanel:), ""),
-                    ("隐藏 ViGo", sel!(hide:), "h"),
-                    ("退出 ViGo", sel!(terminate:), "q"),
-                ],
-            ),
-            (
-                "编辑",
-                vec![
-                    ("撤销", sel!(undo:), "z"),
-                    ("剪切", sel!(cut:), "x"),
-                    ("复制", sel!(copy:), "c"),
-                    ("粘贴", sel!(paste:), "v"),
-                    ("全选", sel!(selectAll:), "a"),
-                ],
-            ),
-        ] {
-            let root = NSMenuItem::new(mtm);
-            let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(heading));
-            for (title, action, key) in commands {
-                let item = NSMenuItem::initWithTitle_action_keyEquivalent(
-                    NSMenuItem::alloc(mtm),
-                    &NSString::from_str(title),
-                    Some(action),
-                    &NSString::from_str(key),
-                );
-                submenu.addItem(&item);
-            }
-            root.setTitle(&NSString::from_str(heading));
-            root.setSubmenu(Some(&submenu));
-            main_menu.addItem(&root);
-        }
-        app.setMainMenu(Some(&main_menu));
-        let (settings, load_notice) = Settings::load();
-        let panel: Allocated<NSWindow> = msg_send![class("NSPanel"), alloc];
+        let (settings, notice) = Settings::load();
+        let allocation: Allocated<NSWindow> = msg_send![class("NSPanel"), alloc];
         let overlay = NSWindow::initWithContentRect_styleMask_backing_defer(
-            panel,
+            allocation,
             NSRect::new(NSPoint::ZERO, NSSize::new(800., 800.)),
             NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
             NSBackingStoreType::Buffered,
@@ -546,40 +448,23 @@ pub fn run() {
                 | NSWindowCollectionBehavior::CanJoinAllApplications,
         );
         let root = native("NSView", r(0., 0., 800., 800.));
-        let canvas = Canvas::new(0, r(0., 0., 800., 800.));
+        let canvas = Canvas::new(r(0., 0., 800., 800.));
         root.addSubview(&canvas);
         overlay.setContentView(Some(&root));
         let status = NSStatusBar::systemStatusBar().statusItemWithLength(-1.);
+        let menu = NSMenu::new(mtm);
+        menu.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        status.setMenu(Some(&menu));
         if let Some(button) = status.button(mtm) {
-            let img = NSImage::initWithContentsOfFile(
+            if let Some(icon) = NSImage::initWithContentsOfFile(
                 NSImage::alloc(),
                 &NSString::from_str(&platform::resource("trayTemplate.png").to_string_lossy()),
-            );
-            if let Some(img) = img {
-                img.setTemplate(true);
-                button.setImage(Some(&img));
-            } else {
-                button.setTitle(ns_string!("V"));
+            ) {
+                icon.setTemplate(true);
+                button.setImage(Some(&icon));
             }
-            button.setTarget(Some(&delegate));
-            button.setAction(Some(sel!(action:)));
-            button.setTag(0);
-            button.setToolTip(Some(ns_string!("ViGo · 按住 V，移动选择，松开执行")));
-            let _: usize = msg_send![&*button,sendActionOn:0x14usize];
+            button.setToolTip(Some(ns_string!("ViGo · Dock 同步轮盘")));
         }
-        let menu = NSMenu::new(mtm);
-        for (title, tag) in [("打开 ViGo 设置…", 1), ("暂停 / 启用", 2), ("退出 ViGo", 3)]
-        {
-            let item = NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(title),
-                Some(sel!(action:)),
-                ns_string!(""),
-            );
-            item.setTarget(Some(&delegate));
-            item.setTag(tag);
-            menu.addItem(&item);
-        } // right-click menu is routed by the status button action below.
         let sheet = NSImage::initWithContentsOfFile(
             NSImage::alloc(),
             &NSString::from_str(&platform::resource("mascot-sheet.png").to_string_lossy()),
@@ -604,30 +489,25 @@ pub fn run() {
             wake,
             platform::kCFRunLoopCommonModes,
         );
-        let mut state = State {
+        let mut s = State {
             app: app.clone(),
             delegate: delegate.clone(),
             settings,
-            settings_window: None,
-            settings_root: None,
-            content_root: None,
             overlay,
             canvas,
             glasses: vec![],
             status,
-            status_menu: menu.clone(),
+            status_menu: menu,
+            capture_window: None,
+            menu_dock_label: None,
             screen_frame: NSRect::ZERO,
             primary_height: 0.,
-            picker: None,
-            picker_doc: None,
-            search: None,
             icons: HashMap::new(),
             sheet,
-            catalog: vec![],
             windows: vec![],
             tabs: vec![],
             running: vec![],
-            tx: tx.clone(),
+            tx,
             rx,
             gesture: Gesture::default(),
             tap: ptr::null_mut(),
@@ -641,12 +521,9 @@ pub fn run() {
             entries: vec![],
             chips: vec![],
             selected_chip: None,
-            page: 0,
-            tab: 0,
-            edit_slot: 0,
-            drag_from: None,
-            drag_to: None,
-            outer_owner: String::new(),
+            ring: layout::DockLayout::new(0, 520., 1470., 956.),
+            anchor: (0., 0.),
+            render_size: 520.,
             opened: 0.,
             closing: None,
             trial: None,
@@ -656,7 +533,7 @@ pub fn run() {
             last_motion: 0.,
             invocations: 0,
             armed: false,
-            hover_mix: [0.; 12],
+            hover_mix: vec![],
             capturing: false,
             capture_dirty: false,
             pending_key: ptr::null_mut(),
@@ -664,49 +541,54 @@ pub fn run() {
             trusted: platform::AXIsProcessTrusted(),
             tap_attempted: false,
             locked: session_locked(),
-            preview: None,
-            preview_gen: 0,
-            preview_key: String::new(),
-            preview_start: 0.,
-            preview_pending: None,
-            preview_image: None,
-            preview_cache: vec![],
-            preview_status: String::new(),
-            preview_title: String::new(),
-            preview_rect: Rect::default(),
-            notice: load_notice,
+            notice,
             toast: None,
-            #[cfg(feature = "diagnostics")]
-            diag_ack: 0,
-            #[cfg(feature = "diagnostics")]
-            preview_frames: 0,
-            #[cfg(feature = "diagnostics")]
-            preview_hashes: std::collections::BTreeSet::new(),
+            wake,
+            effects: vec![],
+            moved: false,
+            layout_dirty: false,
+            dock_observer: ptr::null_mut(),
+            dock_observer_pid: 0,
+            observer_retry: 0.,
+            observer_failures: 0,
+            dock_failures: 0,
+            dock_observed: vec![],
+            reduce_motion: false,
+            dock_pending: false,
+            dock_exact: false,
+            last_dock: -10.,
+            dock_due: 0.,
+            dock_stamp: None,
+            active_paths: vec![],
+            active_names: std::collections::BTreeMap::new(),
             #[cfg(feature = "diagnostics")]
             diag: std::env::args()
                 .collect::<Vec<_>>()
                 .windows(2)
                 .find(|v| v[0] == "--diagnostic-dir")
                 .map(|v| std::path::PathBuf::from(&v[1])),
-            wake,
-            effects: vec![],
-            moved: false,
-            layout_dirty: false,
-            picker_buttons: vec![],
+            #[cfg(feature = "diagnostics")]
+            diag_ack: 0,
         };
-        state.load_icons();
-        state.apply_theme();
-        if state.trusted && !state.locked {
-            state.install_hook();
+        s.apply_theme();
+        if s.trusted && !s.locked {
+            s.install_hook();
         }
-        state.scan();
-        if std::env::args().any(|a| a == "--settings")
-            || state.settings.wheel.iter().all(|p| p.is_empty())
-        {
-            state.show_settings();
+        s.refresh_dock();
+        s.rebuild_menu();
+        let center = NSWorkspace::sharedWorkspace().notificationCenter();
+        for name in [
+            NSWorkspaceDidLaunchApplicationNotification,
+            NSWorkspaceDidTerminateApplicationNotification,
+        ] {
+            center.addObserver_selector_name_object(
+                &delegate,
+                sel!(dockChanged:),
+                Some(name),
+                None,
+            );
         }
-        UI.with(|s| *s.borrow_mut() = Some(state));
-        platform::catalog(tx);
+        UI.with(|c| *c.borrow_mut() = Some(s));
         let timer = NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
             0.5,
             &delegate,
@@ -715,71 +597,66 @@ pub fn run() {
             true,
         );
         timer.setTolerance(0.1);
-        let _keep = (lock, timer, menu);
+        NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+        let _keep = (lock, timer);
         app.run();
     }
 }
-
+unsafe fn center_text(value: &str, frame: Rect, size: f64, bold: bool, c: &NSColor) {
+    let font = NSFont::systemFontOfSize_weight(size, if bold { 0.35 } else { 0. });
+    let p = NSMutableParagraphStyle::new();
+    p.setAlignment(NSTextAlignment::Center);
+    p.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    let a = NSDictionary::<NSString, AnyObject>::from_slices(
+        &[
+            ns_string!("NSFont"),
+            ns_string!("NSColor"),
+            ns_string!("NSParagraphStyle"),
+        ],
+        &[&*font, &**c, &*p],
+    );
+    let s = NSString::from_str(value);
+    let _: () = msg_send![&*s,drawInRect:rect(frame),withAttributes:&*a];
+}
 #[cfg(feature = "diagnostics")]
 impl State {
     unsafe fn diagnostics(&mut self) {
         let Some(dir) = self.diag.clone() else { return };
-        let command = dir.join("command.json");
-        if let Ok(bytes) = std::fs::read(&command) {
-            let _ = std::fs::remove_file(&command);
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("command.json");
+        if let Ok(b) = std::fs::read(&p) {
+            let _ = std::fs::remove_file(p);
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
                 self.diag_ack = v["id"].as_u64().unwrap_or(0);
                 match v["command"].as_str().unwrap_or("") {
-                    "settings" => {
-                        self.tab = v["tab"].as_u64().unwrap_or(0).min(2) as usize;
-                        self.show_settings();
-                    }
-                    "hide" => {
-                        if self.settings_window.is_some() {
-                            self.hide_settings();
-                        }
-                    }
-                    "save" => {
-                        if let Ok(next) = serde_json::from_value::<Settings>(v["settings"].clone())
-                        {
-                            self.close_wheel();
-                            self.settings = next;
-                            self.save();
-                            self.scan();
-                            self.settings_page();
-                        }
-                    }
+                    "refresh" => self.refresh_dock(),
+                    "action" => self.action(
+                        v["tag"].as_i64().unwrap_or(-1) as isize,
+                        &self.delegate.clone(),
+                    ),
                     "trial" => {
-                        let screens = NSScreen::screens(MainThreadMarker::new().unwrap());
-                        let f = screens.firstObject().unwrap().frame();
+                        let f = NSScreen::mainScreen(MainThreadMarker::new().unwrap())
+                            .unwrap()
+                            .frame();
                         self.open_wheel(
                             v["x"].as_f64().unwrap_or(f.size.width / 2.),
                             v["y"].as_f64().unwrap_or(f.size.height / 2.),
                         );
-                        self.trial = Some(self.now() + v["seconds"].as_f64().unwrap_or(5.));
+                        self.trial = Some(self.now() + 3.);
                     }
                     "screenshot" => {
-                        if let Some(w) = if v["overlay"].as_bool() == Some(true) {
-                            Some(&self.overlay)
-                        } else {
-                            self.settings_window.as_ref()
-                        } {
-                            let _ = std::process::Command::new("/usr/sbin/screencapture")
-                                .args(["-x", "-l", &w.windowNumber().to_string()])
-                                .arg(dir.join(if v["overlay"].as_bool() == Some(true) {
-                                    "overlay.png"
-                                } else {
-                                    "settings.png"
-                                }))
-                                .spawn();
-                        }
+                        let rect = v["rect"].as_str().unwrap_or("940,28,380,640");
+                        let _ = std::process::Command::new("/usr/sbin/screencapture")
+                            .args(["-x", "-R", rect])
+                            .arg(dir.join("menu.png"))
+                            .spawn();
                     }
                     "record" => {
                         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
                         let _ = std::process::Command::new(
-                            root.join(".local/verification/record-capture"),
+                            root.join(".local/verification/dock-record-capture"),
                         )
-                        .arg(root.join(".local/verification/native-demo-frames"))
+                        .arg(root.join(".local/verification/dock-demo-frames"))
                         .stdout(std::fs::File::create(dir.join("recording.jsonl")).unwrap())
                         .spawn();
                     }
@@ -788,29 +665,9 @@ impl State {
                 }
             }
         }
-        let _ = std::fs::create_dir_all(&dir);
-        let value = serde_json::json!({"version":"0.3.0","ack":self.diag_ack,"previewFrames":self.preview_frames,"previewDistinct":self.preview_hashes.len(),"pid":std::process::id(),"trusted":self.trusted,"locked":self.locked,"tap":!self.tap.is_null(),"capturing":self.capturing,"active":self.active,"selected":self.selected,"selectedChip":self.selected_chip,"pins":self.settings.wheel.iter().filter(|p|!p.is_empty()).count(),"slots":self.settings.slots_per_page,"windows":self.windows.len(),"tabs":self.tabs.len(),"catalog":self.catalog.len(),"screenPermission":platform::CGPreflightScreenCaptureAccess(),"toastVisible":self.toast.as_ref().is_some_and(|(w,_)|w.isVisible()),"preview":self.preview_status,"previewImage":self.preview_image.is_some(),"previewGeneration":self.preview_gen,"settingsWindow":self.settings_window.as_ref().map(|w|w.windowNumber()),"overlayWindow":self.overlay.windowNumber(),"settingsVisible":self.settings_window.as_ref().is_some_and(|w|w.isVisible()),"center":[self.center.0,self.center.1],"armed":self.armed,"entries":self.entries.iter().map(|e|match e{Content::Window(w)=>serde_json::json!({"kind":"window","id":w.id}),Content::Tab(t)=>serde_json::json!({"kind":"tab","id":t.id}),Content::Pin(p)=>serde_json::json!({"kind":"pin","id":p.id})}).collect::<Vec<_>>(),"chips":self.chips.iter().map(|c|[c.x,c.y,c.w,c.h]).collect::<Vec<_>>(),"notice":self.notice});
-        if let Ok(data) = serde_json::to_vec(&value) {
-            let tmp = dir.join("state.tmp");
-            let _ = std::fs::write(&tmp, data);
-            let _ = std::fs::rename(tmp, dir.join("state.json"));
-        }
+        let v = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"selectedChip":self.selected_chip,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"chips":self.chips.iter().map(|c|[c.x,c.y,c.w,c.h]).collect::<Vec<_>>(),"entries":self.entries.iter().map(|e|match e{Content::Window(w)=>&w.id,Content::Tab(t)=>&t.id}).collect::<Vec<_>>(),"notice":self.notice});
+        let tmp = dir.join("state.tmp");
+        let _ = std::fs::write(&tmp, serde_json::to_vec(&v).unwrap());
+        let _ = std::fs::rename(tmp, dir.join("state.json"));
     }
-}
-
-unsafe fn center_text(value: &str, frame: Rect, size: f64, bold: bool, c: &NSColor) {
-    let font = NSFont::systemFontOfSize_weight(size, if bold { 0.45 } else { 0. });
-    let para = NSMutableParagraphStyle::new();
-    para.setAlignment(NSTextAlignment::Center);
-    para.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-    let attrs = NSDictionary::<NSString, AnyObject>::from_slices(
-        &[
-            ns_string!("NSFont"),
-            ns_string!("NSColor"),
-            ns_string!("NSParagraphStyle"),
-        ],
-        &[&*font, &**c, &*para],
-    );
-    let s = NSString::from_str(value);
-    let _: () = msg_send![&*s,drawInRect:rect(frame),withAttributes:&*attrs];
 }

@@ -1,6 +1,5 @@
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
-#import <ScreenCaptureKit/ScreenCaptureKit.h>
 #include <cstdio>
 #include <mutex>
 #include <thread>
@@ -8,7 +7,6 @@
 #include <dlfcn.h>
 #include <cstring>
 #import <Carbon/Carbon.h>
-#import <CoreImage/CoreImage.h>
 
 static std::mutex outputLock;
 static void output(NSDictionary *value) {
@@ -117,7 +115,7 @@ static void listWindows(NSArray<NSString *> *paths) {
       if(++number>=12)break;
     }
   }
-  output(@{ @"accessibility":@(trusted),@"screen":@(CGPreflightScreenCaptureAccess()),@"running":running,@"windows":windows });
+  output(@{ @"accessibility":@(trusted),@"running":running,@"windows":windows });
 }
 static bool sessionLocked() {
   NSDictionary *session=CFBridgingRelease(CGSessionCopyCurrentDictionary());
@@ -175,60 +173,6 @@ static void activateWindow(NSDictionary *selection) {
   CFRelease(root);output(@{@"ok":@(focused && NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier==pid)});
 }
 
-@interface FrameSink : NSObject<SCStreamOutput,SCStreamDelegate>
-@property(nonatomic,copy) void (^stopped)(void);
-@property(nonatomic,strong) CIContext *context;
-@end
-@implementation FrameSink
-- (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
-  (void)stream;(void)error;output(@{@"ok":@NO,@"reason":@"unavailable"});if(self.stopped)self.stopped();
-}
-- (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sample ofType:(SCStreamOutputType)type {
-  (void)stream;
-  if(type!=SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sample) || !CMSampleBufferDataIsReady(sample))return;
-  @autoreleasepool {
-    NSArray *attachments=(__bridge NSArray *)CMSampleBufferGetSampleAttachmentsArray(sample,false);
-    if(attachments.count && [attachments[0][SCStreamFrameInfoStatus] integerValue]!=SCFrameStatusComplete)return;
-    CVImageBufferRef buffer=CMSampleBufferGetImageBuffer(sample);if(!buffer)return;
-    CIImage *image=[CIImage imageWithCVPixelBuffer:buffer];
-    CGImageRef frame=[self.context createCGImage:image fromRect:image.extent];if(!frame)return;
-    NSBitmapImageRep *rep=[[NSBitmapImageRep alloc] initWithCGImage:frame];
-    NSData *jpeg=[rep representationUsingType:NSBitmapImageFileTypeJPEG properties:@{NSImageCompressionFactor:@0.8}];CGImageRelease(frame);
-    if(jpeg)output(@{@"ok":@YES,@"image":[@"data:image/jpeg;base64," stringByAppendingString:[jpeg base64EncodedStringWithOptions:0]]});
-  }
-}
-@end
-static void streamPreview(CGWindowID windowId, pid_t owner) {
-  [NSApplication sharedApplication];
-  [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
-  if(sessionLocked()){output(@{@"ok":@NO,@"reason":@"locked"});return;}
-  if(!CGPreflightScreenCaptureAccess()){output(@{@"ok":@NO,@"reason":@"permission"});return;}
-  if(@available(macOS 13.0,*)) {
-    CFRunLoopRef loop=CFRunLoopGetCurrent();
-    __block SCStream *stream=nil;__block FrameSink *sink=nil;
-    auto stop=^{CFRunLoopPerformBlock(loop,kCFRunLoopCommonModes,^{CFRunLoopStop(loop);});CFRunLoopWakeUp(loop);};
-    [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:NO completionHandler:^(SCShareableContent *content,NSError *error){
-      if(error){output(@{@"ok":@NO,@"reason":@"unavailable"});stop();return;}
-      SCWindow *selected=nil;for(SCWindow *window in content.windows)if(window.windowID==windowId && window.owningApplication.processID==owner){selected=window;break;}
-      if(!selected || selected.frame.size.width<1 || selected.frame.size.height<1){output(@{@"ok":@NO,@"reason":@"closed"});stop();return;}
-      SCContentFilter *filter=[[SCContentFilter alloc] initWithDesktopIndependentWindow:selected];
-      SCStreamConfiguration *config=[SCStreamConfiguration new];
-      CGFloat scale=MIN(480.0/selected.frame.size.width,300.0/selected.frame.size.height);
-      config.width=MAX(1,(NSUInteger)(selected.frame.size.width*scale));config.height=MAX(1,(NSUInteger)(selected.frame.size.height*scale));
-      config.showsCursor=NO;config.minimumFrameInterval=CMTimeMake(1,10);config.queueDepth=3;
-      sink=[FrameSink new];sink.stopped=stop;sink.context=[CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer:@NO}];
-      stream=[[SCStream alloc] initWithFilter:filter configuration:config delegate:sink];
-      NSError *attachError=nil;
-      if(![stream addStreamOutput:sink type:SCStreamOutputTypeScreen sampleHandlerQueue:dispatch_queue_create("app.vigo.preview",DISPATCH_QUEUE_SERIAL) error:&attachError]){output(@{@"ok":@NO,@"reason":@"unavailable"});stop();return;}
-      [stream startCaptureWithCompletionHandler:^(NSError *startError){if(startError){output(@{@"ok":@NO,@"reason":@"unavailable"});stop();}}];
-    }];
-    std::thread reader([loop]{char byte;while(::read(STDIN_FILENO,&byte,1)>0){}CFRunLoopPerformBlock(loop,kCFRunLoopCommonModes,^{CFRunLoopStop(loop);});CFRunLoopWakeUp(loop);usleep(300000);_exit(0);});reader.detach();
-    // The control pipe owns capture lifetime; EOF also enforces process exit if teardown stalls.
-    CFRunLoopRun();
-    if(stream)[stream stopCaptureWithCompletionHandler:^(NSError *){}];
-  } else output(@{@"ok":@NO,@"reason":@"unsupported"});
-}
-
 static bool browserPath(NSString *path) {
   NSDictionary *info=[NSBundle bundleWithPath:path].infoDictionary;
   for(NSDictionary *type in info[@"CFBundleURLTypes"])for(NSString *scheme in type[@"CFBundleURLSchemes"])if([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"])return true;
@@ -284,71 +228,44 @@ static void browserTabs(NSArray<NSString *> *paths,NSDictionary *selection) {
   output(selection?@{@"ok":@NO}:@{@"tabs":result,@"ok":@YES});
 }
 
-// The catalog is independent of AX/screen permissions and never descends into .app internals.
-static void listApps() {
-  NSFileManager *fm=NSFileManager.defaultManager;
-  NSMutableArray *apps=[NSMutableArray array];NSMutableDictionary *byPath=[NSMutableDictionary dictionary];
-  void (^add)(NSString *)=^(NSString *path){
-    NSString *sourceName=path.lastPathComponent.stringByDeletingPathExtension;
-    NSURL *source=[NSURL fileURLWithPath:path];
-    NSNumber *alias=nil;[source getResourceValue:&alias forKey:NSURLIsAliasFileKey error:nil];
-    if(alias.boolValue){NSURL *target=[NSURL URLByResolvingAliasFileAtURL:source options:NSURLBookmarkResolutionWithoutUI|NSURLBookmarkResolutionWithoutMounting error:nil];if(!target)return;path=target.path;}
-    NSString *resolved=canonical(path);
-    NSMutableDictionary *existing=byPath[resolved];
-    if(existing){NSMutableSet *aliases=[NSMutableSet setWithArray:existing[@"aliases"]];[aliases addObject:sourceName];existing[@"aliases"]=aliases.allObjects;return;}
-    NSBundle *bundle=[NSBundle bundleWithPath:path];if(!bundle)return;
-    NSDictionary *info=bundle.infoDictionary?:@{};
-    NSDictionary *table=[NSDictionary dictionaryWithContentsOfFile:[path stringByAppendingPathComponent:@"Contents/Resources/InfoPlist.loctable"]]?:@{};
-    NSDictionary *zh=[NSDictionary dictionaryWithContentsOfFile:[path stringByAppendingPathComponent:@"Contents/Resources/zh-Hans.lproj/InfoPlist.strings"]]
-      ?:[NSDictionary dictionaryWithContentsOfFile:[path stringByAppendingPathComponent:@"Contents/Resources/zh_CN.lproj/InfoPlist.strings"]]?:table[@"zh_CN"]?:table[@"zh-Hans"]?:@{};
-    NSDictionary *en=[NSDictionary dictionaryWithContentsOfFile:[path stringByAppendingPathComponent:@"Contents/Resources/en.lproj/InfoPlist.strings"]]?:@{};
-    NSString *file=path.lastPathComponent.stringByDeletingPathExtension;
-    NSString *name=alias.boolValue?sourceName:zh[@"CFBundleDisplayName"]?:zh[@"CFBundleName"]?:bundle.localizedInfoDictionary[@"CFBundleDisplayName"]?:info[@"CFBundleDisplayName"]?:info[@"CFBundleName"]?:file;
-    NSMutableSet *aliases=[NSMutableSet setWithObjects:file,sourceName,nil];
-    for(NSDictionary *names in @[info,zh,en,bundle.localizedInfoDictionary?:@{}])for(NSString *key in @[@"CFBundleDisplayName",@"CFBundleName"])if([names[key] isKindOfClass:NSString.class])[aliases addObject:names[key]];
-    NSMutableDictionary *record=[@{@"name":name,@"path":path,@"aliases":aliases.allObjects,@"browser":@(browserPath(path))} mutableCopy];byPath[resolved]=record;[apps addObject:record];
+static void listDock(){
+  NSMutableArray *items=[NSMutableArray array];NSMutableSet *seen=[NSMutableSet set];BOOL exact=NO;
+  void(^add)(id,NSString*,NSString*)=^(id raw,NSString *name,NSString *kind){
+    NSURL *url=[raw isKindOfClass:NSURL.class]?raw:[raw isKindOfClass:NSString.class]?[NSURL URLWithString:raw]:nil;
+    NSString *path=url.isFileURL?url.path:nil;if(!path.length||[seen containsObject:path])return;
+    [seen addObject:path];NSString *label=[name isKindOfClass:NSString.class]&&name.length?name:path.lastPathComponent.stringByDeletingPathExtension;
+    [items addObject:@{@"path":path,@"name":label,@"kind":kind?:@"app"}];
   };
-  NSArray *roots=@[@"/Applications",@"/System/Applications",[NSHomeDirectory() stringByAppendingPathComponent:@"Applications"]];
-  for(NSString *root in roots) {
-    NSDirectoryEnumerator *entries=[fm enumeratorAtURL:[NSURL fileURLWithPath:root] includingPropertiesForKeys:@[NSURLIsDirectoryKey,NSURLIsSymbolicLinkKey] options:NSDirectoryEnumerationSkipsHiddenFiles errorHandler:^BOOL(NSURL *,NSError *){return YES;}];
-    for(NSURL *url in entries) {
-      if([url.pathExtension.lowercaseString isEqualToString:@"app"]){add(url.path);[entries skipDescendants];continue;}
-      NSNumber *isAlias=nil;[url getResourceValue:&isAlias forKey:NSURLIsAliasFileKey error:nil];
-      if(isAlias.boolValue){NSURL *target=[NSURL URLByResolvingAliasFileAtURL:url options:NSURLBookmarkResolutionWithoutUI|NSURLBookmarkResolutionWithoutMounting error:nil];if([target.pathExtension.lowercaseString isEqualToString:@"app"])add(url.path);}
-      NSNumber *link=nil;[url getResourceValue:&link forKey:NSURLIsSymbolicLinkKey error:nil];
-      if(entries.level>=4 || link.boolValue)[entries skipDescendants];
+  if(AXIsProcessTrusted()&&!sessionLocked())for(NSRunningApplication *app in NSWorkspace.sharedWorkspace.runningApplications){
+    if(![app.bundleIdentifier isEqualToString:@"com.apple.dock"])continue;
+    auto root=AXUIElementCreateApplication(app.processIdentifier);AXUIElementSetMessagingTimeout(root,.1);
+    NSArray *children=attribute(root,kAXChildrenAttribute);
+    if([children isKindOfClass:NSArray.class])for(id child in children){
+      auto list=(__bridge AXUIElementRef)child;if(![attribute(list,kAXRoleAttribute)isEqualToString:@"AXList"])continue;
+      NSArray *entries=attribute(list,kAXChildrenAttribute);if(![entries isKindOfClass:NSArray.class])continue;exact=YES;
+      for(id raw in entries){auto e=(__bridge AXUIElementRef)raw;AXUIElementSetMessagingTimeout(e,.05);NSString *sub=attribute(e,kAXSubroleAttribute);
+        if(![sub isKindOfClass:NSString.class]){exact=NO;continue;}
+        if([sub isEqualToString:@"AXApplicationDockItem"]||[sub isEqualToString:@"AXFolderDockItem"]||[sub isEqualToString:@"AXFileDockItem"]){id url=attribute(e,CFSTR("AXURL"));if(!url){exact=NO;continue;}add(url,attribute(e,kAXTitleAttribute),[sub isEqualToString:@"AXApplicationDockItem"]?@"app":@"file");}
+      }
     }
+    CFRelease(root);
   }
-  add(@"/System/Library/CoreServices/Finder.app");
-  for(NSRunningApplication *running in NSWorkspace.sharedWorkspace.runningApplications)
-    if(running.activationPolicy==NSApplicationActivationPolicyRegular && running.bundleURL)add(running.bundleURL.path);
-  output(@{@"apps":apps});
-}
-
-static NSString *iconForPath(NSString *path) {
-  NSImage *image=[NSWorkspace.sharedWorkspace iconForFile:path];
-  NSImage *resized=[[NSImage alloc] initWithSize:NSMakeSize(128,128)];[resized lockFocus];[image drawInRect:NSMakeRect(0,0,128,128) fromRect:NSZeroRect operation:NSCompositingOperationCopy fraction:1];[resized unlockFocus];
-  NSBitmapImageRep *rep=[NSBitmapImageRep imageRepWithData:resized.TIFFRepresentation];NSData *png=[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
-  return png?[@"data:image/png;base64," stringByAppendingString:[png base64EncodedStringWithOptions:0]]:@"";
+  if(items.count==0)exact=NO;
+  if(!exact){[items removeAllObjects];[seen removeAllObjects];for(NSString *key in @[@"persistent-apps",@"recent-apps",@"persistent-others"]){
+    NSArray *entries=CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,CFSTR("com.apple.dock")));if(![entries isKindOfClass:NSArray.class])continue;
+    for(id entry in entries){if(![entry isKindOfClass:NSDictionary.class])continue;NSDictionary *tile=entry[@"tile-data"];if(![tile isKindOfClass:NSDictionary.class])continue;add(tile[@"file-data"][@"_CFURLString"],tile[@"file-label"],[key isEqualToString:@"persistent-others"]?@"file":@"app");}
+  }}
+  output(@{@"items":items,@"exact":@(exact)});
 }
 
 int main(int argc,char **argv) { @autoreleasepool {
   if(argc<2){output(@{@"ok":@NO});return 2;}
   NSString *command=@(argv[1]);
-  if([command isEqualToString:@"tabs"]){NSMutableArray *paths=[NSMutableArray array];for(int i=2;i<argc;i++)[paths addObject:@(argv[i])];browserTabs(paths,nil);}
+  if([command isEqualToString:@"dock"])listDock();
+  else if([command isEqualToString:@"tabs"]){NSMutableArray *paths=[NSMutableArray array];for(int i=2;i<argc;i++)[paths addObject:@(argv[i])];browserTabs(paths,nil);}
   else if([command isEqualToString:@"activate-tab"] && argc==3){id item=[NSJSONSerialization JSONObjectWithData:[@(argv[2]) dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];if([item isKindOfClass:NSDictionary.class] && [item[@"appPath"] isKindOfClass:NSString.class])browserTabs(@[item[@"appPath"]],item);else output(@{@"ok":@NO});}
-  else if([command isEqualToString:@"icon"] && argc==3){
-    [NSApplication sharedApplication];[NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
-    output(@{@"image":iconForPath(@(argv[2]))});
-  }
-  else if([command isEqualToString:@"icons"] && argc>=3){
-    [NSApplication sharedApplication];[NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];NSMutableDictionary *images=[NSMutableDictionary dictionary];
-    for(int i=2;i<argc;i++){@autoreleasepool{images[@(argv[i])]=iconForPath(@(argv[i]));}}output(@{@"images":images});
-  }
-  else if([command isEqualToString:@"apps"])listApps();
   else if([command isEqualToString:@"list"]){NSMutableArray *paths=[NSMutableArray array];for(int i=2;i<argc;i++)[paths addObject:@(argv[i])];listWindows(paths);}
   else if([command isEqualToString:@"activate"] && argc==3){NSData *data=[@(argv[2]) dataUsingEncoding:NSUTF8StringEncoding];id item=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];if([item isKindOfClass:NSDictionary.class])activateWindow(item);else output(@{@"ok":@NO});}
-  else if([command isEqualToString:@"stream"] && argc==4)streamPreview((CGWindowID)strtoul(argv[2],nullptr,10),(pid_t)strtol(argv[3],nullptr,10));
-  else if([command isEqualToString:@"permissions"])output(@{@"accessibility":@(AXIsProcessTrusted()),@"screen":@(CGPreflightScreenCaptureAccess())});
+  else if([command isEqualToString:@"permissions"])output(@{@"accessibility":@(AXIsProcessTrusted())});
   else{output(@{@"ok":@NO});return 2;}
  }return 0;}

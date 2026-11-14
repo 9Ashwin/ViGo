@@ -21,4 +21,7 @@ if test -d /Applications/ViGo.app; then
 fi
 ditto "$app" /Applications/ViGo.app
 codesign --verify --deep --strict /Applications/ViGo.app
+touch /Applications/ViGo.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/ViGo.app
+mdimport -i /Applications/ViGo.app
 open /Applications/ViGo.app

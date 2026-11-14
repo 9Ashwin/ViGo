@@ -1,13 +1,12 @@
 //! macOS event boundary and bounded, isolated system services. No AppKit calls on workers.
-use crate::model::{Tab, Window};
+use crate::model::{DockItem, Tab, Window};
 use objc2_foundation::NSPoint;
-use serde::Deserialize;
 use std::{
     ffi::c_void,
-    io::{BufRead, BufReader, Read},
+    io::Read,
     path::PathBuf,
-    process::{ChildStdin, Command, Stdio},
-    sync::{mpsc::Sender, Arc},
+    process::{Command, Stdio},
+    sync::mpsc::Sender,
     time::{Duration, Instant},
 };
 pub type Ref = *mut c_void;
@@ -29,8 +28,16 @@ pub const REPLAY: i64 = 0x5649474f;
 extern "C" {
     pub fn AXIsProcessTrusted() -> bool;
     pub fn AXIsProcessTrustedWithOptions(options: Ref) -> bool;
-    pub fn CGPreflightScreenCaptureAccess() -> bool;
-    pub fn CGRequestScreenCaptureAccess() -> bool;
+    pub fn AXUIElementCreateApplication(pid: i32) -> Ref;
+    pub fn AXUIElementCopyAttributeValue(element: Ref, name: Ref, value: *mut Ref) -> i32;
+    pub fn AXUIElementSetMessagingTimeout(element: Ref, timeout: f32) -> i32;
+    pub fn AXObserverCreate(
+        pid: i32,
+        callback: extern "C" fn(Ref, Ref, Ref, Ref),
+        observer: *mut Ref,
+    ) -> i32;
+    pub fn AXObserverAddNotification(observer: Ref, element: Ref, name: Ref, info: Ref) -> i32;
+    pub fn AXObserverGetRunLoopSource(observer: Ref) -> Ref;
     pub fn CGEventTapCreate(
         tap: u32,
         place: u32,
@@ -51,9 +58,14 @@ extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     pub fn CFRelease(p: Ref);
+    pub fn CFRetain(p: Ref) -> Ref;
+    pub fn CFArrayGetCount(array: Ref) -> isize;
+    pub fn CFArrayGetValueAtIndex(array: Ref, index: isize) -> Ref;
+    pub fn CFEqual(a: Ref, b: Ref) -> bool;
     pub fn CFMachPortCreateRunLoopSource(allocator: Ref, port: Ref, order: isize) -> Ref;
     pub fn CFRunLoopGetMain() -> Ref;
     pub fn CFRunLoopAddSource(loop_ref: Ref, source: Ref, mode: Ref);
+    pub fn CFRunLoopRemoveSource(loop_ref: Ref, source: Ref, mode: Ref);
     pub fn CFRunLoopSourceCreate(allocator: Ref, order: isize, context: *mut SourceContext) -> Ref;
     pub fn CFRunLoopSourceSignal(source: Ref);
     pub fn CFRunLoopWakeUp(loop_ref: Ref);
@@ -126,43 +138,35 @@ pub fn run(args: &[String], timeout: Duration) -> Result<serde_json::Value, Stri
         .map_err(|e| e.to_string())?;
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
-#[derive(Clone, Debug, Deserialize)]
-pub struct AppInfo {
-    pub name: String,
-    pub path: String,
-    #[serde(default)]
-    pub aliases: Vec<String>,
-    #[serde(default)]
-    pub browser: bool,
-}
 pub enum Message {
-    Catalog(Vec<AppInfo>),
+    Dock {
+        items: Vec<DockItem>,
+        exact: bool,
+    },
     Snapshot {
         windows: Vec<Window>,
         tabs: Vec<Tab>,
         running: Vec<String>,
         paths: Vec<String>,
     },
-    Preview {
-        generation: u64,
-        image: String,
-    },
-    PreviewEnded(u64),
-    PreviewProblem {
-        generation: u64,
-        reason: String,
-    },
+    DockFailed,
     Failure(String),
 }
-pub fn catalog(tx: Sender<Message>) {
-    std::thread::spawn(move || {
-        if let Ok(value) = run(&["apps".into()], Duration::from_secs(8)) {
-            if let Ok(mut apps) = serde_json::from_value::<Vec<AppInfo>>(value["apps"].clone()) {
-                apps.sort_by(|a, b| a.name.cmp(&b.name));
-                let _ = tx.send(Message::Catalog(apps));
+pub fn dock(tx: Sender<Message>) {
+    std::thread::spawn(
+        move || match run(&["dock".into()], Duration::from_millis(2500)) {
+            Ok(v) => {
+                let items = serde_json::from_value(v["items"].clone()).unwrap_or_default();
+                let _ = tx.send(Message::Dock {
+                    items,
+                    exact: v["exact"].as_bool().unwrap_or(false),
+                });
             }
-        }
-    });
+            Err(_) => {
+                let _ = tx.send(Message::DockFailed);
+            }
+        },
+    );
 }
 pub fn snapshot(paths: Vec<String>, tx: Sender<Message>) {
     std::thread::spawn(move || {
@@ -193,76 +197,4 @@ pub fn activate(command: &str, item: String, tx: Sender<Message>) {
             ));
         }
     });
-}
-pub struct Preview {
-    input: Option<ChildStdin>,
-    child: Arc<std::sync::Mutex<std::process::Child>>,
-}
-impl Drop for Preview {
-    fn drop(&mut self) {
-        self.input.take();
-        let child = self.child.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
-            if let Ok(mut child) = child.lock() {
-                if matches!(child.try_wait(), Ok(None)) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-            }
-        });
-    }
-}
-pub fn preview(window: &Window, generation: u64, tx: Sender<Message>) -> Option<Preview> {
-    if window.minimized || window.window_id == 0 {
-        return None;
-    }
-    let mut child = Command::new(helper())
-        .args([
-            "stream",
-            &window.window_id.to_string(),
-            &window.pid.to_string(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let input = child.stdin.take();
-    let output = child.stdout.take()?;
-    let shared = Arc::new(std::sync::Mutex::new(child));
-    let process = shared.clone();
-    std::thread::spawn(move || {
-        for line in BufReader::new(output).lines() {
-            let Ok(line) = line else { break };
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
-                if let Some(image) = value["image"].as_str() {
-                    let _ = tx.send(Message::Preview {
-                        generation,
-                        image: image.into(),
-                    });
-                } else if let Some(reason) = value["reason"].as_str() {
-                    let _ = tx.send(Message::PreviewProblem {
-                        generation,
-                        reason: reason.into(),
-                    });
-                }
-            }
-        }
-        loop {
-            let exited = process
-                .lock()
-                .map(|mut child| !matches!(child.try_wait(), Ok(None)))
-                .unwrap_or(true);
-            if exited {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(15));
-        }
-        let _ = tx.send(Message::PreviewEnded(generation));
-    });
-    Some(Preview {
-        input,
-        child: shared,
-    })
 }
