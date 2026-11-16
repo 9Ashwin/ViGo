@@ -6,7 +6,7 @@ use std::cell::Cell;
 pub(super) struct PreviewData {
     paths: RefCell<Vec<String>>,
     icons: RefCell<Vec<Retained<NSImage>>>,
-    sheet: Retained<NSImage>,
+    mascot: RefCell<std::rc::Rc<super::mascot::MascotImage>>,
     drag: Cell<Option<usize>>,
     drag_path: RefCell<Option<String>>,
     pointer: Cell<NSPoint>,
@@ -39,11 +39,14 @@ define_class!(#[unsafe(super(NSView))]#[thread_kind=MainThreadOnly]#[ivars=Previ
  }
 );
 impl WheelPreview {
-    pub(super) unsafe fn new(frame: Rect, sheet: Retained<NSImage>) -> Retained<Self> {
+    pub(super) unsafe fn new(
+        frame: Rect,
+        mascot: std::rc::Rc<super::mascot::MascotImage>,
+    ) -> Retained<Self> {
         let obj = Self::alloc(MainThreadMarker::new().unwrap()).set_ivars(PreviewData {
             paths: RefCell::new(vec![]),
             icons: RefCell::new(vec![]),
-            sheet,
+            mascot: RefCell::new(mascot),
             drag: Cell::new(None),
             drag_path: RefCell::new(None),
             pointer: Cell::new(NSPoint::ZERO),
@@ -59,6 +62,10 @@ impl WheelPreview {
         }
         *self.ivars().paths.borrow_mut() = paths;
         *self.ivars().icons.borrow_mut() = icons;
+        self.setNeedsDisplay(true);
+    }
+    pub(super) fn set_mascot(&self, mascot: std::rc::Rc<super::mascot::MascotImage>) {
+        *self.ivars().mascot.borrow_mut() = mascot;
         self.setNeedsDisplay(true);
     }
     fn nodes(&self) -> (layout::DockLayout, f64) {
@@ -128,16 +135,7 @@ impl WheelPreview {
         backdrop.stroke();
         let hub = NSBezierPath::bezierPathWithOvalInRect(rect(r(cx - 42., cy - 42., 84., 84.)));
         fill(&hub, &color("controlBackgroundColor"));
-        self.ivars()
-            .sheet
-            .drawInRect_fromRect_operation_fraction_respectFlipped_hints(
-                rect(r(cx - 30., cy - 30., 60., 60.)),
-                rect(r(40., 2288. - 292. - 112., 112., 112.)),
-                NSCompositingOperation::SourceOver,
-                1.,
-                true,
-                None,
-            );
+        self.ivars().mascot.borrow().draw_neutral(cx, cy, 60.);
         let icons = self.ivars().icons.borrow();
         let centers = self.centers();
         if self.ivars().external_drop.get() {

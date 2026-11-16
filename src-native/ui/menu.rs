@@ -235,6 +235,24 @@ impl State {
     }
     pub(super) unsafe fn action(&mut self, tag: isize, _sender: &AnyObject) {
         match tag {
+            810 => {
+                if let Err(error) = self.select_mascot(None) {
+                    self.notice = error;
+                    self.show_failure();
+                }
+            }
+            811 | 812 => self.copy_mascot_prompt(tag == 812),
+            813 => open_url("https://codex-pets.net/"),
+            814 => {
+                if self
+                    .mascot
+                    .asset
+                    .source_url
+                    .starts_with("https://codex-pets.net/")
+                {
+                    open_url(&self.mascot.asset.source_url);
+                }
+            }
             500 => self.show_preferences(),
             501 => {
                 self.settings.hidden_apps.clear();

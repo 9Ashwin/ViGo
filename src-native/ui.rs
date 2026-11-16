@@ -1,4 +1,5 @@
 //! All AppKit state stays on the main thread; Dock queries run in isolated workers.
+mod mascot;
 mod menu;
 mod preferences;
 mod preferences_drag;
@@ -109,6 +110,10 @@ define_class!(#[unsafe(super(NSObject))]#[thread_kind=MainThreadOnly]struct Dele
  }
  impl Delegate{
   #[unsafe(method(releasePreferences:))]fn release_preferences(&self,_sender:Option<&AnyObject>){with(|s|{if s.preferences.as_ref().is_some_and(|p|!p.window.isVisible()){s.preferences=None;}});}
+  #[unsafe(method(mascotSelected:))]fn mascot_selected(&self,sender:&NSPopUpButton){with(|s|unsafe{s.mascot_selected(sender);});}
+  #[unsafe(method(mascotImport:))]fn mascot_import(&self,_sender:Option<&AnyObject>){unsafe{mascot::choose_file();}}
+  #[unsafe(method(mascotWebsite:))]fn mascot_website(&self,_sender:Option<&AnyObject>){unsafe{mascot::choose_website();}}
+  #[unsafe(method(mascotTick:))]fn mascot_tick(&self,_timer:&NSTimer){with(|s|unsafe{s.mascot_tick();});}
   #[unsafe(method(settingsPage:))]fn settings_page(&self,sender:&NSButton){with(|s|unsafe{s.preferences_page(sender.tag() as usize);});}
   #[unsafe(method(settingsLayout:))]fn settings_layout(&self,sender:&NSButton){with(|s|unsafe{s.preferences_layout(sender.tag() as usize);});}
   #[unsafe(method(settingsCatalogApp:))]fn settings_catalog_app(&self,sender:&NSButton){with(|s|unsafe{s.preferences_catalog_app(sender);});}
@@ -146,7 +151,9 @@ struct State {
     screen_frame: NSRect,
     primary_height: f64,
     icons: HashMap<String, Retained<NSImage>>,
-    sheet: Retained<NSImage>,
+    mascot: std::rc::Rc<mascot::MascotImage>,
+    mascot_import_pending: bool,
+    mascot_request_due: f64,
     running: Vec<String>,
     tx: Sender<Message>,
     rx: Receiver<Message>,
@@ -470,11 +477,15 @@ pub fn run() {
             }
             button.setToolTip(Some(ns_string!("ViGo · V 键软件轮盘")));
         }
-        let sheet = NSImage::initWithContentsOfFile(
-            NSImage::alloc(),
-            &NSString::from_str(&platform::resource("mascot-sheet.png").to_string_lossy()),
-        )
-        .expect("Bundled mascot");
+        let selected = settings
+            .mascot_id
+            .as_deref()
+            .and_then(|id| crate::mascot::load(id).ok());
+        let mascot = selected
+            .and_then(|asset| mascot::MascotImage::load(asset).ok())
+            .unwrap_or_else(|| {
+                mascot::MascotImage::load(crate::mascot::default_asset()).expect("Bundled mascot")
+            });
         let (tx, rx) = mpsc::channel();
         let mut context = platform::SourceContext {
             version: 0,
@@ -514,7 +525,9 @@ pub fn run() {
             screen_frame: NSRect::ZERO,
             primary_height: 0.,
             icons: HashMap::new(),
-            sheet,
+            mascot,
+            mascot_import_pending: false,
+            mascot_request_due: 0.,
             running: vec![],
             tx,
             rx,
@@ -643,6 +656,12 @@ impl State {
                 self.diag_ack = v["id"].as_u64().unwrap_or(0);
                 match v["command"].as_str().unwrap_or("") {
                     "refresh" => self.refresh_dock(),
+                    "mascot-import" => {
+                        self.import_mascot(
+                            v["path"].as_str().unwrap_or_default().to_owned(),
+                            v["website"].as_bool().unwrap_or(false),
+                        );
+                    }
                     "settings-snapshot" => {
                         self.preferences_snapshot(&dir);
                     }

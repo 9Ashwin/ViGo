@@ -9,8 +9,9 @@ define_class!(#[unsafe(super(NSView))]#[thread_kind=MainThreadOnly]struct Prefer
 );
 pub(super) struct Preferences {
     pub window: Retained<NSWindow>,
-    page: usize,
-    panes: [Retained<NSView>; 3],
+    pub(super) page: usize,
+    panes: [Retained<NSView>; 4],
+    pub(super) mascot_controls: Option<super::mascot::MascotControls>,
     editor: Retained<NSView>,
     preview: Retained<super::preferences_wheel::WheelPreview>,
     catalog_scroll: Retained<NSScrollView>,
@@ -123,7 +124,7 @@ unsafe fn text(
     parent.addSubview(&field);
     field
 }
-unsafe fn card(parent: &NSView, frame: Rect) -> Retained<NSBox> {
+pub(super) unsafe fn card(parent: &NSView, frame: Rect) -> Retained<NSBox> {
     let box_view =
         NSBox::initWithFrame(NSBox::alloc(MainThreadMarker::new().unwrap()), rect(frame));
     box_view.setBoxType(NSBoxType::Custom);
@@ -169,6 +170,7 @@ impl State {
             .iter()
             .map(|path| NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(path)))
             .collect();
+        p.preview.set_mascot(self.mascot.clone());
         p.preview.update(paths.clone(), icons);
         let query = p.search.stringValue().to_string().trim().to_lowercase();
         let mut apps: std::collections::BTreeMap<String, String> = self
@@ -256,7 +258,7 @@ impl State {
     }
     #[cfg(feature = "diagnostics")]
     pub(super) unsafe fn preferences_diagnostics(&self) -> serde_json::Value {
-        serde_json::json!({"visible":self.preferences.as_ref().is_some_and(|p|p.window.isVisible()),"page":self.preferences.as_ref().map(|p|p.page),"window":self.preferences.as_ref().map(|p|p.window.windowNumber()),"catalogCount":self.catalog.len(),"dragActive":self.preferences_interacting,"catalogTiles":self.catalog_positions(),"previewNodes":self.preferences.as_ref().map(|p|p.preview.centers().iter().map(|(x,y)|{let point=p.window.convertPointToScreen(p.preview.convertPoint_toView(NSPoint::new(*x,*y),None));let height=NSScreen::screens(MainThreadMarker::new().unwrap()).firstObject().unwrap().frame().size.height;[point.x,height-point.y]}).collect::<Vec<_>>()),"policy":self.app.activationPolicy().0,"candidates":self.settings.all_apps(),"visibleApps":self.settings.visible_apps(),"hidden":self.settings.hidden_apps,"added":self.settings.added_apps,"order":self.settings.app_order,"choosing":self.choosing_apps})
+        serde_json::json!({"visible":self.preferences.as_ref().is_some_and(|p|p.window.isVisible()),"page":self.preferences.as_ref().map(|p|p.page),"window":self.preferences.as_ref().map(|p|p.window.windowNumber()),"catalogCount":self.catalog.len(),"dragActive":self.preferences_interacting,"catalogTiles":self.catalog_positions(),"previewNodes":self.preferences.as_ref().map(|p|p.preview.centers().iter().map(|(x,y)|{let point=p.window.convertPointToScreen(p.preview.convertPoint_toView(NSPoint::new(*x,*y),None));let height=NSScreen::screens(MainThreadMarker::new().unwrap()).firstObject().unwrap().frame().size.height;[point.x,height-point.y]}).collect::<Vec<_>>()),"policy":self.app.activationPolicy().0,"candidates":self.settings.all_apps(),"visibleApps":self.settings.visible_apps(),"hidden":self.settings.hidden_apps,"added":self.settings.added_apps,"order":self.settings.app_order,"choosing":self.choosing_apps,"mascot":self.mascot.asset,"mascotPending":self.mascot_import_pending})
     }
     #[cfg(feature = "diagnostics")]
     unsafe fn catalog_positions(&self) -> Vec<serde_json::Value> {
@@ -334,7 +336,7 @@ impl State {
         }
         self.app.setMainMenu(Some(&main));
     }
-    unsafe fn preferences_button(
+    pub(super) unsafe fn preferences_button(
         &self,
         parent: &NSView,
         title: &str,
@@ -354,7 +356,7 @@ impl State {
         parent.addSubview(&b);
         b
     }
-    unsafe fn preferences_popup(
+    pub(super) unsafe fn preferences_popup(
         &self,
         parent: &NSView,
         titles: &[&str],
@@ -436,6 +438,7 @@ impl State {
                 ("我的轮盘", "chart.pie"),
                 ("呼出与手势", "cursorarrow"),
                 ("通用设置", "gearshape"),
+                ("桌面伙伴", "sparkles"),
             ]
             .iter()
             .enumerate()
@@ -503,6 +506,7 @@ impl State {
                 native("NSView", r(212., 48., 660., 454.)),
                 native("NSView", r(212., 48., 660., 454.)),
                 native("NSView", r(212., 48., 660., 454.)),
+                native("NSView", r(212., 48., 660., 454.)),
             ];
             for pane in &panes {
                 pane.setAutoresizingMask(
@@ -513,6 +517,7 @@ impl State {
             }
             panes[1].setHidden(true);
             panes[2].setHidden(true);
+            panes[3].setHidden(true);
             let summary = text(&panes[0], "", r(0., 426., 660., 22.), 13., true, false);
             let search = NSSearchField::initWithFrame(
                 NSSearchField::alloc(mtm),
@@ -572,7 +577,7 @@ impl State {
             );
             let preview = super::preferences_wheel::WheelPreview::new(
                 r(8., 8., 300., 300.),
-                self.sheet.clone(),
+                self.mascot.clone(),
             );
             preview.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
             editor.addSubview(&preview);
@@ -735,12 +740,14 @@ impl State {
                 false,
                 true,
             );
+            let mascot_controls = Some(self.build_mascot_settings(&panes[3]));
             w.setContentView(Some(&root));
             w.center();
             self.preferences = Some(Preferences {
                 window: w,
                 page: 0,
                 panes,
+                mascot_controls,
                 editor,
                 preview,
                 catalog_scroll,
@@ -778,6 +785,7 @@ impl State {
         let p = self.preferences.as_ref().unwrap();
         p.window.deminiaturize(None);
         p.window.makeKeyAndOrderFront(None);
+        self.refresh_mascot_settings();
         #[allow(deprecated)]
         self.app.activateIgnoringOtherApps(true);
     }
@@ -785,7 +793,7 @@ impl State {
         let Some(p) = self.preferences.as_mut() else {
             return;
         };
-        p.page = page.min(2);
+        p.page = page.min(3);
         for (i, v) in p.panes.iter().enumerate() {
             v.setHidden(i != p.page);
         }
@@ -794,20 +802,22 @@ impl State {
             p.window.contentView().unwrap().bounds().size.height - 164. - p.page as f64 * 38.;
         p.selection.setFrame(f);
         p.heading.setStringValue(&NSString::from_str(
-            ["我的轮盘", "呼出与手势", "通用设置"][p.page],
+            ["我的轮盘", "呼出与手势", "通用设置", "桌面伙伴"][p.page],
         ));
         p.description.setStringValue(&NSString::from_str(
             [
                 "跟随 Dock，也能放进你的其他常用软件。",
                 "一次按住，让动作顺着你的习惯。",
                 "轻巧待命，融入你的 Mac。",
+                "默认是熟悉的小猫，也可以换成你的桌面伙伴。",
             ][p.page],
         ));
         p.breadcrumb.setStringValue(&NSString::from_str(&format!(
             "设置  /  {}",
-            ["我的轮盘", "呼出与手势", "通用设置"][p.page]
+            ["我的轮盘", "呼出与手势", "通用设置", "桌面伙伴"][p.page]
         )));
         self.refresh_preferences_status();
+        self.refresh_mascot_settings();
     }
     pub(super) unsafe fn refresh_preferences_apps(&mut self) {
         // Keep a tracked source attached until mouse-up or the native dragging session ends.

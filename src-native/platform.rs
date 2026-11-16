@@ -195,6 +195,7 @@ pub fn run(args: &[String], timeout: Duration) -> Result<serde_json::Value, Stri
 pub enum Message {
     Dock { items: Vec<DockItem>, exact: bool },
     Catalog(Vec<DockItem>),
+    Mascot(Result<crate::mascot::Asset, String>),
     DockFailed,
     Failure(String),
 }

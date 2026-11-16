@@ -2,37 +2,7 @@ use super::*;
 
 impl State {
     pub(super) unsafe fn draw_cat(&self, cx: f64, cy: f64, size: f64, row: usize, frame: usize) {
-        const ROWS: [(usize, f64, f64, f64, f64); 11] = [
-            (7, 25., 64., 141., 132.),
-            (8, 40., 292., 112., 112.),
-            (8, 33., 501., 125., 111.),
-            (4, 41., 708., 109., 112.),
-            (5, 23., 896., 145., 132.),
-            (8, 22., 1132., 148., 104.),
-            (6, 30., 1312., 132., 132.),
-            (6, 8., 1503., 176., 149.),
-            (6, 8., 1714., 176., 146.),
-            (8, 51., 1936., 68., 132.),
-            (8, 43., 2145., 68., 131.),
-        ];
-        let row = ROWS[row];
-        let (w, h) = if row.3 >= row.4 {
-            (size, size * row.4 / row.3)
-        } else {
-            (size * row.3 / row.4, size)
-        };
-        self.sheet
-            .drawInRect_fromRect_operation_fraction_respectFlipped_hints(
-                rect(r(cx - w / 2., cy - h / 2., w, h)),
-                NSRect::new(
-                    NSPoint::new(row.1 + (frame % row.0) as f64 * 192., 2288. - row.2 - row.4),
-                    NSSize::new(row.3, row.4),
-                ),
-                NSCompositingOperation::SourceOver,
-                1.,
-                true,
-                None,
-            );
+        self.mascot.draw(cx, cy, size, row, frame);
     }
     pub(super) unsafe fn draw_wheel(&self) {
         let (cx, cy) = self.center;
@@ -115,6 +85,20 @@ impl State {
             (
                 (dx / 75.).clamp(-1., 1.) * 2.8,
                 (dy / 75.).clamp(-1., 1.) * 1.8,
+            )
+        };
+        let (row, frame) = if self.mascot.asset.layout == crate::mascot::Layout::CodexV2
+            && (self.selected.is_some() || self.tether.alpha() > 0.2)
+        {
+            crate::mascot::look_frame(dx, dy).unwrap_or((0, 6))
+        } else {
+            (
+                row,
+                if row == 0 && self.mascot.asset.layout == crate::mascot::Layout::CodexV2 {
+                    frame % 6
+                } else {
+                    frame
+                },
             )
         };
         self.draw_cat(
@@ -571,6 +555,22 @@ impl State {
         }
         while let Ok(message) = self.rx.try_recv() {
             match message {
+                Message::Mascot(result) => {
+                    self.mascot_import_pending = false;
+                    match result {
+                        Ok(asset) => {
+                            if let Err(error) = self.select_mascot(Some(&asset.id)) {
+                                self.notice = error;
+                                self.show_failure();
+                            }
+                        }
+                        Err(error) => {
+                            self.notice = error;
+                            self.show_failure();
+                        }
+                    }
+                    self.refresh_mascot_settings();
+                }
                 Message::Catalog(items) => {
                     self.catalog_pending = false;
                     self.catalog = items;
@@ -677,6 +677,17 @@ impl State {
         if self.preferences_layout_due > 0. && now >= self.preferences_layout_due {
             self.preferences_layout_due = 0.;
             self.refresh_preferences_apps();
+        }
+        if !self.choosing_apps
+            && !self.mascot_import_pending
+            && !self.preferences_interacting
+            && now >= self.mascot_request_due
+        {
+            self.mascot_request_due = now + 0.5;
+            for request in crate::mascot::pending_requests().into_iter().take(4) {
+                let result = self.select_mascot(Some(&request.asset_id));
+                crate::mascot::respond(&request, result);
+            }
         }
         self.refresh_preferences_permission();
         let stamp = std::fs::metadata(
