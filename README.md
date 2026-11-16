@@ -25,6 +25,14 @@ Rust + AppKit 原生 macOS 轮盘。自动跟随系统 Dock，也能手动添加
 
 外圈只承接放不下的软件。文件夹、文件、废纸篓和分隔线不进入轮盘；不读取浏览器标签，不展示窗口或标签列表。
 
+## 设置界面
+
+左侧轮盘预览、右侧软件图库；支持添加 App、隐藏恢复和拖动排序。
+
+<p align="center">
+  <img src="docs/images/settings.png" alt="ViGo 我的轮盘设置：左侧轮盘预览和右侧已安装软件图库" width="680" />
+</p>
+
 ## 安装与更新
 
 1. 打开下载的 DMG，把左侧 `ViGo.app` 拖到右侧“应用程序”文件夹。
@@ -45,7 +53,7 @@ Rust + AppKit 原生 macOS 轮盘。自动跟随系统 Dock，也能手动添加
 
 按住 V 没反应时，先在菜单栏确认 ViGo 已启用、呼出键为 V，并查看权限/监听状态。监听使用当前用户会话，不依赖 HID 底层位置；只有键盘事件已订阅且监听已启用才显示就绪。菜单中的“复制诊断信息”可提供版本、系统、芯片、权限、监听及安全键盘输入状态，不包含输入内容或软件列表。若提示安全键盘输入开启，请先离开密码框，或检查终端的安全键盘输入选项。
 
-旧自定义列表不再导入，迁移前保存在 `~/Library/Application Support/ViGo/settings.before-dock.json`。新配置只存呼出和显示偏好，Dock 始终只读。
+旧自定义列表不再导入，迁移前保存在 `~/Library/Application Support/ViGo/settings.before-dock.json`。新配置保存呼出和显示偏好、手动软件、隐藏记录及排序，系统 Dock 始终只读。
 
 ## GitHub Actions
 
