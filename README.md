@@ -40,6 +40,8 @@ Rust + AppKit 原生 macOS 轮盘，直接跟随系统 Dock，不维护另一套
 
 本机更新沿用固定签名、应用 ID `com.vigo.desktop` 和安装路径 `/Applications/ViGo.app`，已验证保留授权身份。公开下载包为 ad-hoc 签名、未公证，安装或更新后 macOS 仍可能要求重新授权；首次系统同意需要手动完成。
 
+按住 V 没反应时，先在菜单栏确认 ViGo 已启用、呼出键为 V，并查看权限/监听状态。监听使用当前用户会话，不依赖 HID 底层位置；只有键盘事件已订阅且监听已启用才显示就绪。菜单中的“复制诊断信息”可提供版本、系统、芯片、权限、监听及安全键盘输入状态，不包含输入内容或软件列表。若提示安全键盘输入开启，请先离开密码框，或检查终端的安全键盘输入选项。
+
 旧自定义列表不再导入，迁移前保存在 `~/Library/Application Support/ViGo/settings.before-dock.json`。新配置只存呼出和显示偏好，Dock 始终只读。
 
 ## GitHub Actions

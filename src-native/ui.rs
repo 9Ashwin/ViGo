@@ -130,6 +130,8 @@ struct State {
     rx: Receiver<Message>,
     gesture: Gesture,
     tap: platform::Ref,
+    tap_keyboard: Option<bool>,
+    key_events_seen: bool,
     source: platform::Ref,
     anim_timer: Option<Retained<NSTimer>>,
     birth: Instant,
@@ -245,6 +247,9 @@ extern "C" fn event_hook(
         }
         if platform::CGEventGetIntegerValueField(event, 42) == platform::REPLAY {
             return;
+        }
+        if kind == 10 || kind == 11 {
+            s.key_events_seen = true;
         }
         let code = platform::CGEventGetIntegerValueField(event, 9) as u16;
         let flags = platform::CGEventGetFlags(event);
@@ -497,6 +502,8 @@ pub fn run() {
             rx,
             gesture: Gesture::default(),
             tap: ptr::null_mut(),
+            tap_keyboard: None,
+            key_events_seen: false,
             source: ptr::null_mut(),
             anim_timer: None,
             birth: Instant::now(),
@@ -655,7 +662,7 @@ impl State {
                 }
             }
         }
-        let v = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"permissionGuides":crate::install::guide_count(),"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"softwareOnly":true,"glassCount":self.glasses.iter().filter(|view|!view.isHidden()).count(),"tetherTip":[self.tether.tip().x,self.tether.tip().y],"tetherAlpha":self.tether.alpha(),"tetherSnapped":self.tether.snapped,"emptyBackdrop":true,"notice":self.notice});
+        let v = serde_json::json!({"input":self.input_report(),"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"permissionGuides":crate::install::guide_count(),"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"softwareOnly":true,"glassCount":self.glasses.iter().filter(|view|!view.isHidden()).count(),"tetherTip":[self.tether.tip().x,self.tether.tip().y],"tetherAlpha":self.tether.alpha(),"tetherSnapped":self.tether.snapped,"emptyBackdrop":true,"notice":self.notice});
         let tmp = dir.join("state.tmp");
         let _ = std::fs::write(&tmp, serde_json::to_vec(&v).unwrap());
         let _ = std::fs::rename(tmp, dir.join("state.json"));

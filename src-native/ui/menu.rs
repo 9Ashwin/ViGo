@@ -189,12 +189,17 @@ impl State {
         m.addItem(&NSMenuItem::separatorItem(MainThreadMarker::new().unwrap()));
         if !self.trusted {
             self.item(m, "开启辅助功能权限…", 21, false, true);
-        } else if self.tap.is_null() {
+        } else if self.tap.is_null() || !platform::CGEventTapIsEnabled(self.tap) {
             self.item(m, "重新连接输入监听", 22, false, true);
             self.item(m, "检查辅助功能授权…", 21, false, true);
+        } else if platform::secure_input_enabled() {
+            self.item(m, "安全键盘输入已开启，快捷键暂不可用", -1, false, false);
+        } else if self.tap_keyboard != Some(true) {
+            self.item(m, "监听已连接，键盘状态待确认", -1, false, false);
         } else {
             self.item(m, "输入监听已就绪", -1, false, false);
         }
+        self.item(m, "复制诊断信息", 23, false, true);
         self.item(
             m,
             &format!("关于 ViGo {}", env!("CARGO_PKG_VERSION")),
@@ -289,9 +294,17 @@ impl State {
                 self.tap_retry_at = 0.;
                 self.tap_attempted = false;
                 self.notice.clear();
-                if self.tap.is_null() {
-                    self.install_hook();
-                }
+                self.remove_hook();
+                self.install_hook();
+            }
+            23 => {
+                let report = self.input_report();
+                let clipboard = NSPasteboard::generalPasteboard();
+                clipboard.clearContents();
+                clipboard.setString_forType(
+                    &NSString::from_str(&report.to_string()),
+                    NSPasteboardTypeString,
+                );
             }
             30 => self.refresh_dock(),
             31 => open_url("x-apple.systempreferences:com.apple.preference.dock"),
@@ -343,6 +356,25 @@ impl State {
             }
             _ => {}
         }
+    }
+    pub(super) unsafe fn input_report(&self) -> serde_json::Value {
+        serde_json::json!({
+            "version":env!("CARGO_PKG_VERSION"),
+            "macOS":NSProcessInfo::processInfo().operatingSystemVersionString().to_string(),
+            "arch":std::env::consts::ARCH,
+            "enabled":self.settings.enabled_on_start,
+            "trigger":self.trigger_label(),
+            "accessibility":platform::accessibility_trusted(),
+            "sessionLocked":session_locked(),
+            "secureInput":platform::secure_input_enabled(),
+            "tapLocation":"session",
+            "tapConnected":!self.tap.is_null(),
+            "tapEnabled":!self.tap.is_null() && platform::CGEventTapIsEnabled(self.tap),
+            "keyboardSubscribed":self.tap_keyboard,
+            "keyboardEventsSeen":self.key_events_seen,
+            "dockApps":self.settings.wheel.len(),
+            "notice":self.notice,
+        })
     }
 }
 

@@ -820,7 +820,32 @@ impl State {
         let types = [1u32, 3, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27];
         let mask = types.iter().fold(0u64, |m, t| m | (1u64 << t));
         self.tap_attempted = true;
-        self.tap = platform::CGEventTapCreate(0, 0, 0, mask, event_hook, ptr::null_mut());
+        // A user-session filter avoids depending on the privileged HID tap location.
+        self.tap = platform::CGEventTapCreate(
+            platform::SESSION_TAP,
+            0,
+            0,
+            mask,
+            event_hook,
+            ptr::null_mut(),
+        );
+        if !self.tap.is_null() {
+            self.source = platform::CFMachPortCreateRunLoopSource(ptr::null_mut(), self.tap, 0);
+            if !self.source.is_null() {
+                platform::CFRunLoopAddSource(
+                    platform::CFRunLoopGetMain(),
+                    self.source,
+                    platform::kCFRunLoopCommonModes,
+                );
+                platform::CGEventTapEnable(self.tap, true);
+                self.tap_keyboard = platform::keyboard_tap_registered();
+                if self.tap_keyboard == Some(false) {
+                    self.remove_hook();
+                }
+            } else {
+                self.remove_hook();
+            }
+        }
         if self.tap.is_null() {
             self.tap_failures = self.tap_failures.saturating_add(1);
             if self.tap_failures < 5 {
@@ -828,26 +853,21 @@ impl State {
                 self.tap_retry_at = self.now() + 0.25 * 2f64.powi(self.tap_failures as i32 - 1);
             }
             self.notice = if self.tap_attempted {
-                "输入监听暂时不可用，请从菜单手动重试"
+                "键盘监听未连接，请从菜单检查授权或重新连接"
             } else {
-                "输入监听暂时不可用，正在重新连接"
+                "键盘监听暂时不可用，正在重新连接"
             }
             .into();
+            if self.tap_attempted && !self.locked {
+                self.show_failure();
+            }
         } else {
             self.tap_failures = 0;
             self.notice.clear();
         }
-        if !self.tap.is_null() {
-            self.source = platform::CFMachPortCreateRunLoopSource(ptr::null_mut(), self.tap, 0);
-            platform::CFRunLoopAddSource(
-                platform::CFRunLoopGetMain(),
-                self.source,
-                platform::kCFRunLoopCommonModes,
-            );
-            platform::CGEventTapEnable(self.tap, true);
-        }
     }
     pub(super) unsafe fn remove_hook(&mut self) {
+        self.tap_keyboard = None;
         if !self.source.is_null() {
             platform::CFRunLoopRemoveSource(
                 platform::CFRunLoopGetMain(),

@@ -24,6 +24,34 @@ pub struct SourceContext {
     pub perform: Ref,
 }
 pub const REPLAY: i64 = 0x5649474f;
+pub const SESSION_TAP: u32 = 1;
+pub const KEYBOARD_EVENTS: u64 = (1 << 10) | (1 << 11);
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct TapInformation {
+    id: u32,
+    point: u32,
+    options: u32,
+    events: u64,
+    process: i32,
+    target: i32,
+    enabled: bool,
+    minimum: f32,
+    average: f32,
+    maximum: f32,
+}
+impl TapInformation {
+    fn keyboard_filter_for(&self, process: i32) -> bool {
+        self.process == process
+            && self.point == SESSION_TAP
+            && self.options == 0
+            && self.events & KEYBOARD_EVENTS == KEYBOARD_EVENTS
+    }
+}
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+    fn IsSecureEventInputEnabled() -> u8;
+}
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     pub fn AXIsProcessTrusted() -> bool;
@@ -47,6 +75,8 @@ extern "C" {
         info: Ref,
     ) -> Ref;
     pub fn CGEventTapEnable(tap: Ref, on: bool);
+    pub fn CGEventTapIsEnabled(tap: Ref) -> bool;
+    fn CGGetEventTapList(maximum: u32, list: *mut TapInformation, count: *mut u32) -> i32;
     pub fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
     pub fn CGEventSetIntegerValueField(event: Ref, field: u32, value: i64);
     pub fn CGEventGetFlags(event: Ref) -> u64;
@@ -54,6 +84,29 @@ extern "C" {
     pub fn CGEventCreateCopy(event: Ref) -> Ref;
     pub fn CGEventSetType(event: Ref, kind: u32);
     pub fn CGEventTapPostEvent(proxy: Ref, event: Ref);
+}
+pub unsafe fn secure_input_enabled() -> bool {
+    IsSecureEventInputEnabled() != 0
+}
+
+/// Quartz may remove keyboard bits while returning a valid, mouse-only tap.
+/// Query failure is unknown, rather than evidence that the keyboard is unavailable.
+pub fn keyboard_tap_registered() -> Option<bool> {
+    unsafe {
+        let mut count = 0;
+        if CGGetEventTapList(0, std::ptr::null_mut(), &mut count) != 0 || count > 4096 {
+            return None;
+        }
+        let mut taps = vec![TapInformation::default(); (count + 16) as usize];
+        if CGGetEventTapList(taps.len() as u32, taps.as_mut_ptr(), &mut count) != 0 {
+            return None;
+        }
+        Some(
+            taps.iter()
+                .take(count as usize)
+                .any(|t| t.keyboard_filter_for(std::process::id() as i32)),
+        )
+    }
 }
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
@@ -207,4 +260,26 @@ pub fn simulate_permission(trusted: bool) {
 #[cfg(feature = "diagnostics")]
 pub fn permission_is_simulated() -> bool {
     PERMISSION_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) >= 0
+}
+
+#[cfg(test)]
+mod tap_tests {
+    use super::*;
+    #[test]
+    fn mouse_only_or_partial_keyboard_taps_do_not_report_keyboard_ready() {
+        let mut tap = TapInformation {
+            process: 41,
+            point: SESSION_TAP,
+            ..Default::default()
+        };
+        for mask in [1 << 5, 1 << 10, 1 << 11] {
+            tap.events = mask;
+            assert!(!tap.keyboard_filter_for(41));
+        }
+        tap.events = KEYBOARD_EVENTS | (1 << 5);
+        assert!(tap.keyboard_filter_for(41));
+        assert!(!tap.keyboard_filter_for(42));
+        tap.options = 1; // A listen-only tap cannot suppress V while the wheel is open.
+        assert!(!tap.keyboard_filter_for(41));
+    }
 }
