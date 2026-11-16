@@ -54,7 +54,7 @@ Codex 可在生成完成后执行：
 
 也可以传入单张 PNG/WebP 或宠物 ZIP。命令返回 JSON；`applied: true` 才表示 ViGo 已确认应用。应用没运行时会自动启动；无法确认时会保留导入请求，并明确返回 `applied: false`。导入失败会保留当前伙伴。
 
-兼容图集使用 `pet.json` 与 `spritesheet.webp`/PNG：V1 为 1536×1872，V2 为 1536×2288、`spriteVersionNumber: 2`。动态效果由素材本身决定，单张图片不会伪装成多帧动画。伙伴素材、选择和来源保存在 `~/Library/Application Support/ViGo/`。
+兼容图集使用 `pet.json` 与 `spritesheet.webp`/PNG：V1 为 1536×1872，V2 为 1536×2288、`spriteVersionNumber: 2`。动态效果由素材本身决定，单张图片不会伪装成多帧动画。部分图集缺少中性姿态或动作帧时，会自动回退到可见帧，不必重新导入。伙伴素材、选择和来源保存在 `~/Library/Application Support/ViGo/`。
 
 ## 安装与更新
 

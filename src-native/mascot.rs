@@ -39,6 +39,9 @@ pub struct Asset {
     pub width: u32,
     pub height: u32,
     pub bounds: Vec<Bounds>,
+    /// Derived from image alpha when selected; old packages need no metadata migration.
+    #[serde(skip)]
+    pub visible_frames: Vec<Vec<bool>>,
     #[serde(default)]
     pub source_url: String,
     #[serde(default)]
@@ -235,18 +238,19 @@ pub fn default_asset() -> Asset {
                 height: h,
             })
             .collect(),
+        visible_frames: vec![],
         source_url: String::new(),
         author: String::new(),
     }
 }
 impl Asset {
     pub fn frame(&self, row: usize, frame: usize) -> Bounds {
-        let row = if self.layout == Layout::Static || self.layout == Layout::CodexV1 && row >= 9 {
+        let mut row = if self.layout == Layout::Static || self.layout == Layout::CodexV1 && row >= 9
+        {
             0
         } else {
             row.min(self.bounds.len().saturating_sub(1))
         };
-        let b = self.bounds[row];
         let count = if self.layout == Layout::Static {
             1
         } else if self.layout == Layout::CodexV1 && row == 0 {
@@ -254,9 +258,29 @@ impl Asset {
         } else {
             FRAMES[row]
         };
+        let mut frame = frame % count;
+        if let Some(visible) = self.visible_frames.get(row) {
+            if !visible.get(frame).copied().unwrap_or(false) {
+                if let Some(next) = (0..count)
+                    .map(|offset| (frame + offset) % count)
+                    .find(|&i| visible.get(i).copied().unwrap_or(false))
+                {
+                    frame = next;
+                } else if let Some((fallback, index)) = self
+                    .visible_frames
+                    .iter()
+                    .enumerate()
+                    .find_map(|(r, frames)| frames.iter().position(|&v| v).map(|i| (r, i)))
+                {
+                    row = fallback;
+                    frame = index;
+                }
+            }
+        }
+        let b = self.bounds[row];
         Bounds {
             x: b.x
-                + (frame % count) as u32
+                + frame as u32
                     * if self.layout == Layout::Static {
                         0
                     } else {
@@ -584,7 +608,14 @@ fn install(
     let scratch = Scratch(stage);
     let temp = scratch.0.join("image");
     fs::write(&temp, data).map_err(|e| e.to_string())?;
-    let (layout, width, height, bounds, ext) = inspect(
+    let Inspection {
+        layout,
+        width,
+        height,
+        bounds,
+        ext,
+        visible_frames,
+    } = inspect(
         &temp,
         pet.as_ref()
             .map(|p| p.sprite_version_number)
@@ -600,6 +631,7 @@ fn install(
         width,
         height,
         bounds,
+        visible_frames,
         source_url,
         author,
     };
@@ -675,10 +707,34 @@ fn classify(width: u32, height: u32, version: Option<u8>) -> Result<Layout> {
     }
     Ok(layout)
 }
-fn inspect(
-    path: &Path,
-    version: Option<u8>,
-) -> Result<(Layout, u32, u32, Vec<Bounds>, &'static str)> {
+struct Inspection {
+    layout: Layout,
+    width: u32,
+    height: u32,
+    bounds: Vec<Bounds>,
+    ext: &'static str,
+    visible_frames: Vec<Vec<bool>>,
+}
+pub fn populate_visibility(asset: &mut Asset) -> Result<()> {
+    if asset.layout == Layout::DefaultCat || !asset.visible_frames.is_empty() {
+        return Ok(());
+    }
+    let info = inspect(
+        &image_path(asset),
+        match asset.layout {
+            Layout::CodexV1 => Some(1),
+            Layout::CodexV2 => Some(2),
+            _ => None,
+        },
+    )?;
+    if info.width != asset.width || info.height != asset.height || info.layout != asset.layout {
+        return Err("素材图片尺寸已变化，请重新导入".into());
+    }
+    asset.bounds = info.bounds;
+    asset.visible_frames = info.visible_frames;
+    Ok(())
+}
+fn inspect(path: &Path, version: Option<u8>) -> Result<Inspection> {
     unsafe {
         let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
         let src = owned(CGImageSourceCreateWithURL(
@@ -733,6 +789,20 @@ fn inspect(
             };
             rows
         ];
+        let mut visible_frames = (0..rows)
+            .map(|row| {
+                vec![
+                    true;
+                    if layout == Layout::Static {
+                        1
+                    } else if row == 0 && layout == Layout::CodexV1 {
+                        6
+                    } else {
+                        FRAMES[row]
+                    }
+                ]
+            })
+            .collect();
         if CGImageGetBitsPerPixel(image.0) == 32 && CGImageGetBitsPerComponent(image.0) == 8 {
             let alpha = CGImageGetAlphaInfo(image.0);
             let mut index = match alpha {
@@ -757,20 +827,33 @@ fn inspect(
                     return Err("图片像素数据异常".into());
                 }
                 let data = std::slice::from_raw_parts(CFDataGetBytePtr(bytes.0), length as usize);
-                bounds = alpha_bounds(data, width, height, stride, alpha, layout)?;
+                let analysis = analyze_pixels(data, width, height, stride, alpha, layout)?;
+                bounds = analysis.bounds;
+                visible_frames = analysis.visible_frames;
             }
         }
-        Ok((layout, width, height, bounds, ext))
+        Ok(Inspection {
+            layout,
+            width,
+            height,
+            bounds,
+            ext,
+            visible_frames,
+        })
     }
 }
-fn alpha_bounds(
+struct PixelAnalysis {
+    bounds: Vec<Bounds>,
+    visible_frames: Vec<Vec<bool>>,
+}
+fn analyze_pixels(
     data: &[u8],
     width: u32,
     height: u32,
     stride: usize,
     alpha: usize,
     layout: Layout,
-) -> Result<Vec<Bounds>> {
+) -> Result<PixelAnalysis> {
     let rows = match layout {
         Layout::CodexV1 => 9,
         Layout::CodexV2 => 11,
@@ -782,6 +865,20 @@ fn alpha_bounds(
         (192, 208)
     };
     let mut extents = vec![None::<(u32, u32, u32, u32)>; rows];
+    let mut visible_frames: Vec<_> = (0..rows)
+        .map(|row| {
+            vec![
+                false;
+                if layout == Layout::Static {
+                    1
+                } else if row == 0 && layout == Layout::CodexV1 {
+                    6
+                } else {
+                    FRAMES[row]
+                }
+            ]
+        })
+        .collect();
     for y in 0..height {
         for x in 0..width {
             let row = (y / ch) as usize;
@@ -796,6 +893,7 @@ fn alpha_bounds(
             if col as usize >= frames || data[y as usize * stride + x as usize * 4 + alpha] < 12 {
                 continue;
             }
+            visible_frames[row][col as usize] = true;
             let (x, y) = (x % cw, y % ch);
             extents[row] = Some(match extents[row] {
                 Some((l, t, r, b)) => (l.min(x), t.min(y), r.max(x), b.max(y)),
@@ -816,7 +914,7 @@ fn alpha_bounds(
         extents[9] = union;
         extents[10] = union;
     }
-    Ok(extents
+    let bounds = extents
         .into_iter()
         .map(|v| {
             if let Some((l, t, r, b)) = v {
@@ -837,7 +935,11 @@ fn alpha_bounds(
                 }
             }
         })
-        .collect())
+        .collect();
+    Ok(PixelAnalysis {
+        bounds,
+        visible_frames,
+    })
 }
 pub fn generation_prompt(description: &str, current: Option<&Asset>) -> String {
     let subject = if description.trim().is_empty() {
@@ -931,10 +1033,54 @@ mod tests {
     #[test]
     fn transparent_images_are_rejected_and_crops_enclose_visible_pixels() {
         let mut rgba = vec![0u8; 8 * 8 * 4];
-        assert!(alpha_bounds(&rgba, 8, 8, 32, 3, Layout::Static).is_err());
+        assert!(analyze_pixels(&rgba, 8, 8, 32, 3, Layout::Static).is_err());
         rgba[(4 * 8 + 4) * 4 + 3] = 255;
-        let b = alpha_bounds(&rgba, 8, 8, 32, 3, Layout::Static).unwrap()[0];
+        let b = analyze_pixels(&rgba, 8, 8, 32, 3, Layout::Static)
+            .unwrap()
+            .bounds[0];
         assert!(b.x <= 4 && b.y <= 4 && b.x + b.width > 4 && b.y + b.height > 4);
+    }
+    fn visible_v2() -> Asset {
+        let mut a = default_asset();
+        a.layout = Layout::CodexV2;
+        a.visible_frames = FRAMES.iter().map(|&n| vec![true; n]).collect();
+        a
+    }
+    #[test]
+    fn blank_neutral_cell_uses_visible_idle_without_changing_complete_sheets() {
+        let mut a = visible_v2();
+        let neutral = a.frame(0, 6);
+        assert_ne!(neutral, a.frame(0, 0));
+        a.visible_frames[0][6] = false;
+        assert_eq!(a.frame(0, 6), a.frame(0, 0));
+        a.visible_frames[0][6] = true;
+        assert_eq!(a.frame(0, 6), neutral);
+    }
+    #[test]
+    fn blank_animation_frames_and_entire_rows_fall_back_to_visible_content() {
+        let mut a = visible_v2();
+        a.visible_frames[3][1] = false;
+        assert_eq!(a.frame(3, 1), a.frame(3, 2));
+        a.visible_frames[3].fill(false);
+        assert_eq!(a.frame(3, 1), a.frame(0, 0));
+        a.visible_frames[0].fill(false);
+        assert_eq!(a.frame(3, 1), a.frame(1, 0));
+    }
+    #[test]
+    fn v2_alpha_analysis_detects_the_missing_seventh_idle_cell() {
+        let mut rgba = vec![0u8; 1536 * 2288 * 4];
+        for col in 0..6 {
+            rgba[(8 * 1536 + col * 192 + 8) * 4 + 3] = 255;
+        }
+        let analysis = analyze_pixels(&rgba, 1536, 2288, 1536 * 4, 3, Layout::CodexV2).unwrap();
+        assert_eq!(
+            analysis.visible_frames[0],
+            vec![true, true, true, true, true, true, false]
+        );
+        let mut a = visible_v2();
+        a.bounds = analysis.bounds;
+        a.visible_frames = analysis.visible_frames;
+        assert_eq!(a.frame(0, 6), a.frame(0, 0));
     }
     #[test]
     fn stored_metadata_cannot_reference_outside_the_library() {

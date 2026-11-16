@@ -9,7 +9,8 @@ pub(super) struct MascotImage {
     image: Retained<NSImage>,
 }
 impl MascotImage {
-    pub(super) unsafe fn load(asset: assets::Asset) -> Result<Rc<Self>, String> {
+    pub(super) unsafe fn load(mut asset: assets::Asset) -> Result<Rc<Self>, String> {
+        assets::populate_visibility(&mut asset)?;
         let image = NSImage::initWithContentsOfFile(
             NSImage::alloc(),
             &NSString::from_str(&assets::image_path(&asset).to_string_lossy()),
