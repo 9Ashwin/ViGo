@@ -523,23 +523,7 @@ pub fn pet_id(value: &str) -> Result<String> {
     Ok(id.into())
 }
 fn download(url: &str, limit: usize) -> Result<Vec<u8>> {
-    if !url.starts_with("https://codex-pets.net/") {
-        return Err("素材下载地址必须来自 codex-pets.net".into());
-    }
-    let mut cmd = Command::new("/usr/bin/curl");
-    cmd.args([
-        "--silent",
-        "--show-error",
-        "--fail",
-        "--proto",
-        "=https",
-        "--connect-timeout",
-        "10",
-        "--max-time",
-        "40",
-        url,
-    ]);
-    output(cmd, limit, Duration::from_secs(45))
+    crate::network::download(url, limit)
 }
 struct Scratch(PathBuf);
 impl Drop for Scratch {
