@@ -201,17 +201,15 @@ impl State {
             (apps.len().div_ceil(columns) as f64 * 86.).max(p.catalog_scroll.contentSize().height);
         let document: Retained<AppList> = msg_send![AppList::alloc(MainThreadMarker::new().unwrap()),initWithFrame:rect(r(0.,0.,width,height))];
         for (i, (path, name)) in apps.into_iter().enumerate() {
-            let b = self.preferences_button(
-                &document,
-                &name,
-                r(
-                    (i % columns) as f64 * tile,
-                    (i / columns) as f64 * 86.,
-                    tile,
-                    82.,
-                ),
-                0,
-            );
+            let b = super::preferences_drag::CatalogButton::new(r(
+                (i % columns) as f64 * tile,
+                (i / columns) as f64 * 86.,
+                tile,
+                82.,
+            ));
+            b.setTitle(&NSString::from_str(&name));
+            b.setTarget(Some(&*self.delegate));
+            document.addSubview(&b);
             b.setButtonType(NSButtonType::PushOnPushOff);
             b.setBezelStyle(NSBezelStyle::Push);
             b.setBordered(false);
@@ -239,9 +237,9 @@ impl State {
                 "{} · {}",
                 name,
                 if paths.contains(&path) {
-                    "点击隐藏"
+                    "点击隐藏，或拖到轮盘调整位置"
                 } else {
-                    "点击添加"
+                    "点击添加，或拖到轮盘指定位置"
                 }
             ))));
             b.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
@@ -258,7 +256,36 @@ impl State {
     }
     #[cfg(feature = "diagnostics")]
     pub(super) unsafe fn preferences_diagnostics(&self) -> serde_json::Value {
-        serde_json::json!({"visible":self.preferences.as_ref().is_some_and(|p|p.window.isVisible()),"page":self.preferences.as_ref().map(|p|p.page),"window":self.preferences.as_ref().map(|p|p.window.windowNumber()),"catalogCount":self.catalog.len(),"previewNodes":self.preferences.as_ref().map(|p|p.preview.centers().iter().map(|(x,y)|{let point=p.window.convertPointToScreen(p.preview.convertPoint_toView(NSPoint::new(*x,*y),None));let height=NSScreen::screens(MainThreadMarker::new().unwrap()).firstObject().unwrap().frame().size.height;[point.x,height-point.y]}).collect::<Vec<_>>()),"policy":self.app.activationPolicy().0,"candidates":self.settings.all_apps(),"visibleApps":self.settings.visible_apps(),"hidden":self.settings.hidden_apps,"added":self.settings.added_apps,"order":self.settings.app_order,"choosing":self.choosing_apps})
+        serde_json::json!({"visible":self.preferences.as_ref().is_some_and(|p|p.window.isVisible()),"page":self.preferences.as_ref().map(|p|p.page),"window":self.preferences.as_ref().map(|p|p.window.windowNumber()),"catalogCount":self.catalog.len(),"dragActive":self.preferences_interacting,"catalogTiles":self.catalog_positions(),"previewNodes":self.preferences.as_ref().map(|p|p.preview.centers().iter().map(|(x,y)|{let point=p.window.convertPointToScreen(p.preview.convertPoint_toView(NSPoint::new(*x,*y),None));let height=NSScreen::screens(MainThreadMarker::new().unwrap()).firstObject().unwrap().frame().size.height;[point.x,height-point.y]}).collect::<Vec<_>>()),"policy":self.app.activationPolicy().0,"candidates":self.settings.all_apps(),"visibleApps":self.settings.visible_apps(),"hidden":self.settings.hidden_apps,"added":self.settings.added_apps,"order":self.settings.app_order,"choosing":self.choosing_apps})
+    }
+    #[cfg(feature = "diagnostics")]
+    unsafe fn catalog_positions(&self) -> Vec<serde_json::Value> {
+        let Some(p) = &self.preferences else {
+            return vec![];
+        };
+        let Some(doc) = p.catalog_scroll.documentView() else {
+            return vec![];
+        };
+        let height = NSScreen::screens(MainThreadMarker::new().unwrap())
+            .firstObject()
+            .unwrap()
+            .frame()
+            .size
+            .height;
+        doc.subviews()
+            .iter()
+            .filter_map(|view| {
+                let path: Option<Retained<NSString>> = msg_send![&**view, identifier];
+                path.map(|path| {
+                    let b = view.bounds();
+                    let point = p.window.convertPointToScreen(view.convertPoint_toView(
+                        NSPoint::new(b.size.width / 2., b.size.height / 2.),
+                        None,
+                    ));
+                    serde_json::json!({"path":path.to_string(),"point":[point.x,height-point.y]})
+                })
+            })
+            .collect()
     }
     #[cfg(feature = "diagnostics")]
     pub(super) unsafe fn preferences_snapshot(&self, dir: &std::path::Path) {
@@ -573,7 +600,7 @@ impl State {
 
             text(
                 &panes[0],
-                "点选软件添加 / 隐藏，拖动轮盘图标调整顺序。",
+                "软件可拖入轮盘；轮盘图标互拖换位。",
                 r(0., 9., 430., 18.),
                 11.,
                 false,
@@ -783,6 +810,10 @@ impl State {
         self.refresh_preferences_status();
     }
     pub(super) unsafe fn refresh_preferences_apps(&mut self) {
+        // Keep a tracked source attached until mouse-up or the native dragging session ends.
+        if self.preferences_interacting {
+            return;
+        }
         let Some(p) = self.preferences.as_ref() else {
             return;
         };

@@ -10,9 +10,26 @@ pub(super) struct PreviewData {
     drag: Cell<Option<usize>>,
     drag_path: RefCell<Option<String>>,
     pointer: Cell<NSPoint>,
+    external_drop: Cell<bool>,
 }
 define_class!(#[unsafe(super(NSView))]#[thread_kind=MainThreadOnly]#[ivars=PreviewData]
  pub(super) struct WheelPreview;
+ unsafe impl NSObjectProtocol for WheelPreview{}
+ unsafe impl NSDraggingDestination for WheelPreview{
+  #[unsafe(method(draggingEntered:))]fn entered(&self,sender:&ProtocolObject<dyn NSDraggingInfo>)->NSDragOperation{unsafe{self.drop_feedback(sender)}}
+  #[unsafe(method(draggingUpdated:))]fn updated(&self,sender:&ProtocolObject<dyn NSDraggingInfo>)->NSDragOperation{unsafe{self.drop_feedback(sender)}}
+  #[unsafe(method(draggingExited:))]fn exited(&self,_sender:Option<&ProtocolObject<dyn NSDraggingInfo>>){self.ivars().external_drop.set(false);self.setNeedsDisplay(true);}
+  #[unsafe(method(prepareForDragOperation:))]fn prepare(&self,sender:&ProtocolObject<dyn NSDraggingInfo>)->bool{!super::preferences_drag::application_paths(&sender.draggingPasteboard(),false).is_empty()}
+  #[unsafe(method(performDragOperation:))]fn perform_drop(&self,sender:&ProtocolObject<dyn NSDraggingInfo>)->bool{unsafe{
+    let paths=super::preferences_drag::application_paths(&sender.draggingPasteboard(),true);
+    let point=self.convertPoint_fromView(sender.draggingLocation(),None);
+    let before=self.drop_hit(point).and_then(|i|self.ivars().paths.borrow().get(i).cloned());
+    self.ivars().external_drop.set(false);self.setNeedsDisplay(true);
+    let mut accepted=false;
+    if !paths.is_empty(){with(|s|accepted=s.preferences_drop(&paths,before.as_deref()));}accepted
+  }}
+  #[unsafe(method(draggingEnded:))]fn drag_ended(&self,_sender:&ProtocolObject<dyn NSDraggingInfo>){self.ivars().external_drop.set(false);self.setNeedsDisplay(true);}
+ }
  impl WheelPreview{
   #[unsafe(method(drawRect:))]fn draw(&self,_r:NSRect){unsafe{self.paint();}}
   #[unsafe(method(mouseDown:))]fn down(&self,event:&NSEvent){let point=self.convertPoint_fromView(event.locationInWindow(),None);let index=self.hit(point);self.ivars().drag.set(index);*self.ivars().drag_path.borrow_mut()=index.and_then(|i|self.ivars().paths.borrow().get(i).cloned());self.ivars().pointer.set(point);self.setNeedsDisplay(true);}
@@ -30,8 +47,11 @@ impl WheelPreview {
             drag: Cell::new(None),
             drag_path: RefCell::new(None),
             pointer: Cell::new(NSPoint::ZERO),
+            external_drop: Cell::new(false),
         });
-        msg_send![super(obj),initWithFrame:rect(frame)]
+        let view: Retained<Self> = msg_send![super(obj),initWithFrame:rect(frame)];
+        view.registerForDraggedTypes(&NSArray::from_slice(&[NSPasteboardTypeFileURL]));
+        view
     }
     pub(super) fn update(&self, paths: Vec<String>, icons: Vec<Retained<NSImage>>) {
         if let Some(path) = self.ivars().drag_path.borrow().as_ref() {
@@ -67,6 +87,30 @@ impl WheelPreview {
             .iter()
             .position(|(x, y)| (point.x - x).hypot(point.y - y) < (layout.icon * scale / 2. + 9.))
     }
+    fn drop_hit(&self, point: NSPoint) -> Option<usize> {
+        let (layout, scale) = self.nodes();
+        let size = self.bounds().size;
+        layout.hit(
+            (point.x - size.width / 2.) / scale,
+            (size.height / 2. - point.y) / scale,
+            None,
+        )
+    }
+    unsafe fn drop_feedback(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+        let valid =
+            !super::preferences_drag::application_paths(&sender.draggingPasteboard(), false)
+                .is_empty();
+        self.ivars().external_drop.set(valid);
+        self.ivars()
+            .pointer
+            .set(self.convertPoint_fromView(sender.draggingLocation(), None));
+        self.setNeedsDisplay(true);
+        if valid {
+            NSDragOperation::Copy
+        } else {
+            NSDragOperation::None
+        }
+    }
     unsafe fn paint(&self) {
         let size = self.bounds().size;
         let cx = size.width / 2.;
@@ -96,6 +140,28 @@ impl WheelPreview {
             );
         let icons = self.ivars().icons.borrow();
         let centers = self.centers();
+        if self.ivars().external_drop.get() {
+            let ring = if let Some(i) = self.drop_hit(self.ivars().pointer.get()) {
+                let (x, y) = centers[i];
+                let side = (layout.icon * scale + 16.).max(38.);
+                NSBezierPath::bezierPathWithOvalInRect(rect(r(
+                    x - side / 2.,
+                    y - side / 2.,
+                    side,
+                    side,
+                )))
+            } else {
+                NSBezierPath::bezierPathWithOvalInRect(rect(r(
+                    4.,
+                    4.,
+                    size.width - 8.,
+                    size.height - 8.,
+                )))
+            };
+            color("controlAccentColor").setStroke();
+            ring.setLineWidth(2.);
+            ring.stroke();
+        }
         for (i, (x, y)) in centers.iter().enumerate() {
             if let Some(icon) = icons.get(i) {
                 let side = layout.icon * scale;

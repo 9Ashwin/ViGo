@@ -1,6 +1,7 @@
 //! All AppKit state stays on the main thread; Dock queries run in isolated workers.
 mod menu;
 mod preferences;
+mod preferences_drag;
 mod preferences_wheel;
 mod wheel;
 use crate::{
@@ -139,6 +140,8 @@ struct State {
     catalog: Vec<crate::model::DockItem>,
     catalog_pending: bool,
     preferences_layout_due: f64,
+    preferences_interacting: bool,
+    catalog_drag_source: Option<Retained<preferences_drag::CatalogButton>>,
     menu_dock_label: Option<Retained<NSTextField>>,
     screen_frame: NSRect,
     primary_height: f64,
@@ -271,7 +274,7 @@ extern "C" fn event_hook(
         if kind == 10 || kind == 11 {
             s.key_events_seen = true;
         }
-        if s.choosing_apps {
+        if s.choosing_apps || s.preferences_interacting {
             return;
         }
         let code = platform::CGEventGetIntegerValueField(event, 9) as u16;
@@ -505,6 +508,8 @@ pub fn run() {
             catalog: vec![],
             catalog_pending: false,
             preferences_layout_due: 0.,
+            preferences_interacting: false,
+            catalog_drag_source: None,
             menu_dock_label: None,
             screen_frame: NSRect::ZERO,
             primary_height: 0.,

@@ -104,6 +104,36 @@ impl Settings {
             self.app_order = apps;
         }
     }
+    /// Insert a dropped app before the targeted app, keeping all other apps and hidden choices.
+    pub fn insert_application(&mut self, path: &str, before: Option<&str>) {
+        self.add_application(path);
+        if before == Some(path) {
+            return;
+        }
+        let mut apps = self.all_apps();
+        apps.retain(|p| p != path);
+        let at = before
+            .and_then(|target| apps.iter().position(|p| p == target))
+            .unwrap_or(apps.len());
+        apps.insert(at, path.to_owned());
+        self.app_order = apps;
+    }
+    pub fn drop_application(&mut self, path: &str, target: Option<&str>) {
+        if self.visible_apps().iter().any(|p| p == path) {
+            if let Some(target) =
+                target.filter(|target| self.all_apps().iter().any(|p| p == *target))
+            {
+                self.swap_applications(path, target);
+            } else {
+                let mut apps = self.all_apps();
+                apps.retain(|p| p != path);
+                apps.push(path.to_owned());
+                self.app_order = apps;
+            }
+        } else {
+            self.insert_application(path, target);
+        }
+    }
     pub fn set_app_visible(&mut self, path: &str, visible: bool) {
         if visible {
             self.hidden_apps.remove(path);
@@ -185,6 +215,58 @@ pub fn remap_selection(old: &[String], new: &[String], slot: Option<usize>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dragging_an_existing_gallery_app_lands_in_the_target_slot_without_pinning_or_duplication() {
+        let mut s = Settings::default();
+        s.wheel = vec!["/A.app".into(), "/B.app".into(), "/C.app".into()];
+        s.drop_application("/A.app", Some("/C.app"));
+        assert_eq!(s.visible_apps(), vec!["/C.app", "/B.app", "/A.app"]);
+        assert!(s.added_apps.is_empty());
+        s.drop_application("/C.app", None);
+        assert_eq!(s.visible_apps(), vec!["/B.app", "/A.app", "/C.app"]);
+        s.drop_application("/New.app", Some("/A.app"));
+        assert_eq!(
+            s.visible_apps(),
+            vec!["/B.app", "/New.app", "/A.app", "/C.app"]
+        );
+    }
+    #[test]
+    fn gallery_drop_inserts_without_replacing_apps_or_duplicating_existing_entries() {
+        let mut s = Settings::default();
+        s.wheel = vec!["/A.app".into(), "/B.app".into(), "/C.app".into()];
+        s.insert_application("/New.app", Some("/B.app"));
+        assert_eq!(
+            s.visible_apps(),
+            vec!["/A.app", "/New.app", "/B.app", "/C.app"]
+        );
+        s.insert_application("/C.app", Some("/A.app"));
+        assert_eq!(
+            s.visible_apps(),
+            vec!["/C.app", "/A.app", "/New.app", "/B.app"]
+        );
+        assert_eq!(
+            s.added_apps
+                .iter()
+                .filter(|p| p.as_str() == "/C.app")
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn dropped_apps_unhide_and_missing_targets_append_safely() {
+        let mut s = Settings::default();
+        s.wheel = vec!["/A.app".into(), "/B.app".into()];
+        s.set_app_visible("/B.app", false);
+        s.insert_application("/B.app", Some("/A.app"));
+        assert_eq!(s.visible_apps(), vec!["/B.app", "/A.app"]);
+        s.insert_application("/New.app", Some("/Gone.app"));
+        assert_eq!(s.visible_apps(), vec!["/B.app", "/A.app", "/New.app"]);
+        s.insert_application("/B.app", None);
+        assert_eq!(s.visible_apps(), vec!["/A.app", "/New.app", "/B.app"]);
+        let before = s.app_order.clone();
+        s.insert_application("/New.app", Some("/New.app"));
+        assert_eq!(s.app_order, before);
+    }
     #[test]
     fn wheel_editor_swaps_by_app_identity_and_keeps_hidden_apps_and_other_slots() {
         let mut s = Settings::default();
