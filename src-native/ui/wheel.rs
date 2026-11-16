@@ -536,23 +536,28 @@ impl State {
                 platform::CGEventTapEnable(self.tap, true);
             }
         }
-        let trusted = platform::AXIsProcessTrusted();
+        let trusted = platform::accessibility_trusted();
         if trusted != self.trusted {
             self.trusted = trusted;
             self.tap_attempted = false;
+            self.tap_failures = 0;
+            self.tap_retry_at = now;
             self.observer_retry = 0.;
             self.observer_failures = 0;
             self.dock_observer_pid = 0;
-            if !self.tap.is_null() {
-                platform::CGEventTapEnable(self.tap, trusted);
-            }
             if !trusted {
+                self.remove_hook();
                 self.gesture.reset();
                 self.close_wheel();
+                self.permission_guide_pending = true;
             }
             self.dock_due = now;
         }
-        if trusted && self.tap.is_null() && !self.tap_attempted {
+        if self.permission_guide_pending && !self.locked {
+            self.permission_guide_pending = false;
+            let _: () = msg_send![&*self.delegate,performSelector:sel!(permissionGuide:),withObject:None::<&AnyObject>,afterDelay:0.0f64];
+        }
+        if trusted && self.tap.is_null() && !self.tap_attempted && now >= self.tap_retry_at {
             self.install_hook();
         }
         if trusted && !self.locked {
@@ -809,12 +814,28 @@ impl State {
         }
     }
     pub(super) unsafe fn install_hook(&mut self) {
+        if !self.trusted || !self.tap.is_null() {
+            return;
+        }
         let types = [1u32, 3, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27];
         let mask = types.iter().fold(0u64, |m, t| m | (1u64 << t));
         self.tap_attempted = true;
         self.tap = platform::CGEventTapCreate(0, 0, 0, mask, event_hook, ptr::null_mut());
         if self.tap.is_null() {
-            self.notice = "系统尚未允许输入监听，请检查辅助功能后点击重新连接".into();
+            self.tap_failures = self.tap_failures.saturating_add(1);
+            if self.tap_failures < 5 {
+                self.tap_attempted = false;
+                self.tap_retry_at = self.now() + 0.25 * 2f64.powi(self.tap_failures as i32 - 1);
+            }
+            self.notice = if self.tap_attempted {
+                "输入监听暂时不可用，请从菜单手动重试"
+            } else {
+                "输入监听暂时不可用，正在重新连接"
+            }
+            .into();
+        } else {
+            self.tap_failures = 0;
+            self.notice.clear();
         }
         if !self.tap.is_null() {
             self.source = platform::CFMachPortCreateRunLoopSource(ptr::null_mut(), self.tap, 0);
@@ -826,12 +847,27 @@ impl State {
             platform::CGEventTapEnable(self.tap, true);
         }
     }
+    pub(super) unsafe fn remove_hook(&mut self) {
+        if !self.source.is_null() {
+            platform::CFRunLoopRemoveSource(
+                platform::CFRunLoopGetMain(),
+                self.source,
+                platform::kCFRunLoopCommonModes,
+            );
+            platform::CFRelease(self.source);
+            self.source = ptr::null_mut();
+        }
+        if !self.tap.is_null() {
+            platform::CGEventTapEnable(self.tap, false);
+            platform::CFMachPortInvalidate(self.tap);
+            platform::CFRelease(self.tap);
+            self.tap = ptr::null_mut();
+        }
+    }
     pub(super) fn stop(&mut self) {
         self.gesture.reset();
         unsafe {
-            if !self.tap.is_null() {
-                platform::CGEventTapEnable(self.tap, false);
-            }
+            self.remove_hook();
         }
     }
 }

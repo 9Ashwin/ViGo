@@ -66,6 +66,7 @@ extern "C" {
     pub fn CFRunLoopGetMain() -> Ref;
     pub fn CFRunLoopAddSource(loop_ref: Ref, source: Ref, mode: Ref);
     pub fn CFRunLoopRemoveSource(loop_ref: Ref, source: Ref, mode: Ref);
+    pub fn CFMachPortInvalidate(port: Ref);
     pub fn CFRunLoopSourceCreate(allocator: Ref, order: isize, context: *mut SourceContext) -> Ref;
     pub fn CFRunLoopSourceSignal(source: Ref);
     pub fn CFRunLoopWakeUp(loop_ref: Ref);
@@ -171,4 +172,39 @@ pub fn activate(command: &str, item: String, tx: Sender<Message>) {
             ));
         }
     });
+}
+
+/// Query only; never trigger a system prompt from a polling timer.
+pub fn accessibility_trusted() -> bool {
+    #[cfg(feature = "diagnostics")]
+    {
+        let value = PERMISSION_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+        if value >= 0 {
+            return value != 0;
+        }
+    }
+    unsafe { AXIsProcessTrusted() }
+}
+pub unsafe fn request_accessibility() {
+    if AXIsProcessTrusted() {
+        return;
+    }
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{ns_string, NSDictionary, NSNumber, NSString};
+    let options = NSDictionary::<NSString, AnyObject>::from_slices(
+        &[ns_string!("AXTrustedCheckOptionPrompt")],
+        &[&*NSNumber::numberWithBool(true)],
+    );
+    AXIsProcessTrustedWithOptions(Retained::as_ptr(&options) as Ref);
+}
+#[cfg(feature = "diagnostics")]
+static PERMISSION_OVERRIDE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+#[cfg(feature = "diagnostics")]
+pub fn simulate_permission(trusted: bool) {
+    PERMISSION_OVERRIDE.store(i8::from(trusted), std::sync::atomic::Ordering::Relaxed);
+}
+#[cfg(feature = "diagnostics")]
+pub fn permission_is_simulated() -> bool {
+    PERMISSION_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) >= 0
 }

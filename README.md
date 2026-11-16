@@ -4,7 +4,7 @@
 
 Rust + AppKit 原生 macOS 轮盘，直接跟随系统 Dock，不维护另一套软件列表。
 
-[下载最新 macOS 版本](https://github.com/9Ashwin/ViGo/releases/latest) · Apple Silicon（M 系列）
+[下载 macOS 安装盘](https://github.com/9Ashwin/ViGo/releases/latest/download/ViGo-macOS-arm64.dmg) · Apple Silicon（M 系列）
 
 <p align="center">
   <img src="docs/images/vigo-demo.gif" alt="按住 V，牵引到软件，松开后实际切换到预览" width="520" />
@@ -22,17 +22,29 @@ Rust + AppKit 原生 macOS 轮盘，直接跟随系统 Dock，不维护另一套
 
 外圈只承接放不下的软件。文件夹、文件、废纸篓和分隔线不进入轮盘；不读取浏览器标签，不展示窗口或标签列表。
 
+## 安装与更新
+
+1. 打开下载的 DMG，把左侧 `ViGo.app` 拖到右侧“应用程序”文件夹。
+2. 更新前先从菜单栏退出旧版，再拖入并选择“替换”；从 `/Applications/ViGo.app` 启动，避免保留“ViGo 2”副本。
+3. 首次启动按引导开启辅助功能，随后按住 V 即可使用。
+
+直接从安装盘或下载目录启动新包时，ViGo 也提供安装提示：先校验完整性和签名，再更新固定路径并启动；已有同版时使用已安装版本。没有写入权限时会引导使用访达的标准安装流程。安装错误会保留旧版本，准备期间不会修改它。
+
+小猫图标由 Apple `iconutil` 从完整尺寸图集生成，并在启动时显式设置、按版本重新登记。安装盘附带应用程序快捷方式与操作说明。
+
 ## 权限与更新
 
 仅需要辅助功能识别全局按键、读取 Dock 和切换软件。不捕获窗口画面，不请求屏幕录制。
 
-权限请求只在主动点击菜单中的权限入口时发生。固定签名、应用 ID `com.vigo.desktop` 和安装路径 `/Applications/ViGo.app`，保留后续更新的授权身份。
+未授权时，启动会自动显示辅助功能引导；点击引导按钮后由 macOS 登记授权请求并打开正确设置页。选择稍后不会反复打扰；已授权时不弹引导。授权后输入监听会自动恢复，无需重启；运行中撤销权限则停止监听并重新提示一次。
+
+本机更新沿用固定签名、应用 ID `com.vigo.desktop` 和安装路径 `/Applications/ViGo.app`，已验证保留授权身份。公开下载包为 ad-hoc 签名、未公证，安装或更新后 macOS 仍可能要求重新授权；首次系统同意需要手动完成。
 
 旧自定义列表不再导入，迁移前保存在 `~/Library/Application Support/ViGo/settings.before-dock.json`。新配置只存呼出和显示偏好，Dock 始终只读。
 
 ## GitHub Actions
 
-[Native builds](https://github.com/9Ashwin/ViGo/actions/workflows/build.yml) 在 push、PR 和手动触发时执行格式、测试、Clippy，并生成 macOS Apple Silicon ZIP 与 SHA-256 校验值。产物在运行页的 Artifacts 保留 14 天。
+[Native builds](https://github.com/9Ashwin/ViGo/actions/workflows/build.yml) 在 push、PR 和手动触发时执行格式、测试、Clippy，并生成 macOS Apple Silicon DMG、开发用 ZIP 与 SHA-256 校验值。安装盘还会挂载核验里面的应用签名、图标尺寸、快捷方式和布局。产物在运行页的 Artifacts 保留 14 天。
 
 CI macOS 包使用 ad-hoc 签名，未公证，用于测试分发；macOS 本机覆盖更新继续使用固定 Apple Development 身份，CI 不上传本机私钥。旧 Electron 版本保留在 [`v0.2.1-electron`](https://github.com/9Ashwin/ViGo/tree/v0.2.1-electron)，`main` 为 Rust 原生版本。
 
@@ -46,6 +58,7 @@ cargo fmt --check
 cargo clippy --all-features -- -D warnings
 sh tools/native/bundle.sh
 sh tools/native/install.sh
+sh tools/native/dmg.sh
 ```
 
 产物为 `release/native/ViGo.app`。安装脚本退出旧进程、保留旧包备份后替换，重新登记应用并刷新该应用的 Spotlight 元数据。图标资源名随内容哈希更新，避免复用旧图标缓存。可用 `VIGO_SIGN_IDENTITY` 指定固定签名身份。

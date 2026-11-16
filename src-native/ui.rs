@@ -93,6 +93,8 @@ impl Canvas {
 define_class!(#[unsafe(super(NSObject))]#[thread_kind=MainThreadOnly]struct Delegate;
  unsafe impl NSObjectProtocol for Delegate{}
  unsafe impl NSApplicationDelegate for Delegate{
+  #[unsafe(method(applicationDidFinishLaunching:))]fn launched(&self,_n:&NSNotification){with(|state|{state.permission_guide_pending = !state.trusted;});}
+
   #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]fn reopen(&self,_a:&NSApplication,_v:bool)->bool{open_menu();true}
   #[unsafe(method(applicationWillTerminate:))]fn quit(&self,_n:&NSNotification){with(|s|s.stop());}
  }
@@ -102,6 +104,7 @@ define_class!(#[unsafe(super(NSObject))]#[thread_kind=MainThreadOnly]struct Dele
   #[unsafe(method(windowDidResignKey:))]fn resign(&self,_n:&NSNotification){with(|s|unsafe{if s.capturing{s.capturing=false;s.dismiss_capture();}});}
  }
  impl Delegate{
+  #[unsafe(method(permissionGuide:))]fn permission_guide(&self,_sender:Option<&AnyObject>){unsafe{let mtm=MainThreadMarker::new().unwrap();crate::install::welcome(&NSApplication::sharedApplication(mtm),mtm);}}
   #[unsafe(method(action:))]fn action(&self,sender:&AnyObject){let tag:isize=unsafe{msg_send![sender,tag]};with(|s|unsafe{s.action(tag,sender)});}
   #[unsafe(method(tick:))]fn tick(&self,_t:&NSTimer){with(|s|unsafe{s.tick()});}
   #[unsafe(method(dockChanged:))]fn dock_changed(&self,n:&NSNotification){let regular=unsafe{n.userInfo().and_then(|d|d.objectForKey(NSWorkspaceApplicationKey)).is_some_and(|a|{let policy:isize=msg_send![&*a,activationPolicy];policy==0})};if regular{with(|s|{s.dock_due=s.now()+0.35;});}}
@@ -152,6 +155,9 @@ struct State {
     capture_release: Option<u16>,
     trusted: bool,
     tap_attempted: bool,
+    tap_retry_at: f64,
+    tap_failures: u8,
+    permission_guide_pending: bool,
     locked: bool,
     notice: String,
     toast: Option<(Retained<NSWindow>, f64)>,
@@ -183,7 +189,7 @@ unsafe fn open_url(url: &str) {
         NSWorkspace::sharedWorkspace().openURL(&url);
     }
 }
-unsafe fn session_locked() -> bool {
+pub(crate) unsafe fn session_locked() -> bool {
     let raw = platform::CGSessionCopyCurrentDictionary();
     if raw.is_null() {
         return true;
@@ -381,6 +387,13 @@ fn open_menu() {
 }
 pub fn run() {
     unsafe {
+        let mtm = MainThreadMarker::new().unwrap();
+        let app = NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        crate::install::set_icon(&app);
+        if !crate::install::bootstrap(&app, mtm) {
+            return;
+        }
         let _ = std::fs::create_dir_all(Settings::path().parent().unwrap());
         let lock = std::fs::OpenOptions::new()
             .create(true)
@@ -394,9 +407,10 @@ pub fn run() {
                 return;
             }
         }
-        let mtm = MainThreadMarker::new().unwrap();
-        let app = NSApplication::sharedApplication(mtm);
-        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        #[cfg(feature = "diagnostics")]
+        if std::env::args().any(|arg| arg == "--test-missing-accessibility") {
+            platform::simulate_permission(false);
+        }
         let delegate: Retained<Delegate> = msg_send![Delegate::alloc(mtm), init];
         app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         let (settings, notice) = Settings::load();
@@ -506,8 +520,11 @@ pub fn run() {
             capture_dirty: false,
             pending_key: ptr::null_mut(),
             capture_release: None,
-            trusted: platform::AXIsProcessTrusted(),
+            trusted: platform::accessibility_trusted(),
             tap_attempted: false,
+            tap_retry_at: 0.,
+            tap_failures: 0,
+            permission_guide_pending: false,
             locked: session_locked(),
             notice,
             toast: None,
@@ -598,6 +615,9 @@ impl State {
                 self.diag_ack = v["id"].as_u64().unwrap_or(0);
                 match v["command"].as_str().unwrap_or("") {
                     "refresh" => self.refresh_dock(),
+                    "test-permission" => {
+                        platform::simulate_permission(v["trusted"].as_bool().unwrap_or(false))
+                    }
                     "action" => self.action(
                         v["tag"].as_i64().unwrap_or(-1) as isize,
                         &self.delegate.clone(),
@@ -635,7 +655,7 @@ impl State {
                 }
             }
         }
-        let v = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"softwareOnly":true,"glassCount":self.glasses.iter().filter(|view|!view.isHidden()).count(),"tetherTip":[self.tether.tip().x,self.tether.tip().y],"tetherAlpha":self.tether.alpha(),"tetherSnapped":self.tether.snapped,"emptyBackdrop":true,"notice":self.notice});
+        let v = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"permissionGuides":crate::install::guide_count(),"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"softwareOnly":true,"glassCount":self.glasses.iter().filter(|view|!view.isHidden()).count(),"tetherTip":[self.tether.tip().x,self.tether.tip().y],"tetherAlpha":self.tether.alpha(),"tetherSnapped":self.tether.snapped,"emptyBackdrop":true,"notice":self.notice});
         let tmp = dir.join("state.tmp");
         let _ = std::fs::write(&tmp, serde_json::to_vec(&v).unwrap());
         let _ = std::fs::rename(tmp, dir.join("state.json"));

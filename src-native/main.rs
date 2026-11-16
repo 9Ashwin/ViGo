@@ -1,4 +1,5 @@
 mod input;
+mod install;
 mod layout;
 mod model;
 mod platform;

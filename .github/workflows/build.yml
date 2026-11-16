@@ -29,6 +29,8 @@ jobs:
         env:
           VIGO_SIGN_IDENTITY: '-'
         run: sh tools/native/bundle.sh
+      - name: Build and verify installation DMG
+        run: sh tools/native/dmg.sh
       - name: Verify and archive
         run: |
           codesign --verify --deep --strict release/native/ViGo.app
@@ -36,12 +38,13 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent release/native/ViGo.app release/ViGo-macOS-arm64-ci.zip
           unzip -t release/ViGo-macOS-arm64-ci.zip
           echo 'CI testing build: ad-hoc signed, not notarized. Local installed updates use your fixed signing identity.' > release/CI-BUILD-NOTICE.txt
-          shasum -a 256 release/ViGo-macOS-arm64-ci.zip > release/SHA256SUMS.txt
+          shasum -a 256 release/ViGo-macOS-arm64-ci.zip release/ViGo-macOS-arm64.dmg > release/SHA256SUMS.txt
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: ViGo-macOS-arm64
           path: |
             release/ViGo-macOS-arm64-ci.zip
+            release/ViGo-macOS-arm64.dmg
             release/CI-BUILD-NOTICE.txt
             release/SHA256SUMS.txt
           if-no-files-found: error

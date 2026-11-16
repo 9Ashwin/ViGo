@@ -279,16 +279,14 @@ impl State {
                 self.trial = Some(self.now() + 3.);
             }
             21 => {
-                let options = NSDictionary::<NSString, AnyObject>::from_slices(
-                    &[ns_string!("AXTrustedCheckOptionPrompt")],
-                    &[&*NSNumber::numberWithBool(true)],
-                );
-                platform::AXIsProcessTrustedWithOptions(Retained::as_ptr(&options) as *mut c_void);
+                platform::request_accessibility();
                 open_url(
                     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
                 );
             }
             22 => {
+                self.tap_failures = 0;
+                self.tap_retry_at = 0.;
                 self.tap_attempted = false;
                 self.notice.clear();
                 if self.tap.is_null() {
