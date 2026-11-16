@@ -199,6 +199,7 @@ unsafe fn alert(
     buttons: &[&str],
     mtm: MainThreadMarker,
 ) -> isize {
+    let previous_policy = app.activationPolicy();
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let dialog = NSAlert::new(mtm);
     dialog.setAlertStyle(NSAlertStyle::Informational);
@@ -216,7 +217,7 @@ unsafe fn alert(
     #[allow(deprecated)]
     app.activateIgnoringOtherApps(true);
     let response = dialog.runModal();
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    app.setActivationPolicy(previous_policy);
     response
 }
 #[link(name = "CoreServices", kind = "framework")]
@@ -254,7 +255,17 @@ unsafe fn stop_other_instances() -> bool {
     }
     false
 }
-fn lock_installation(path: &Path) -> Result<fs::File> {
+struct InstallationLock(fs::File);
+impl Drop for InstallationLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // Release at the transaction boundary even if a concurrent spawn inherited the description.
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+fn lock_installation(path: &Path) -> Result<InstallationLock> {
     use std::os::fd::AsRawFd;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -268,7 +279,7 @@ fn lock_installation(path: &Path) -> Result<fs::File> {
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err("另一个 ViGo 安装流程正在进行，请先完成或关闭它。".into());
     }
-    Ok(lock)
+    Ok(InstallationLock(lock))
 }
 unsafe fn launch(path: &Path, after_install: bool) -> bool {
     let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(ns_string!(
@@ -582,8 +593,10 @@ mod tests {
         let path = s.0.join("install-lock");
         let first = lock_installation(&path).unwrap();
         assert!(lock_installation(&path).is_err());
+        let inherited = first.0.try_clone().unwrap();
         drop(first);
         assert!(lock_installation(&path).is_ok());
+        drop(inherited);
     }
     #[test]
     fn release_versions_are_compared_numerically() {

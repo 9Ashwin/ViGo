@@ -380,8 +380,14 @@ impl State {
         if let Some((window, _)) = self.toast.take() {
             window.orderOut(None);
         }
-        self.active_paths = self.settings.wheel.clone();
+        self.active_paths = self.settings.visible_apps();
         self.active_names = self.settings.names.clone();
+        if self.active_paths.is_empty() {
+            self.close_wheel();
+            self.notice = "轮盘中还没有软件，请在设置中勾选要显示的软件".into();
+            self.show_failure();
+            return;
+        }
         self.reduce_motion =
             NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
         self.status_menu.cancelTracking();
@@ -553,7 +559,7 @@ impl State {
             }
             self.dock_due = now;
         }
-        if self.permission_guide_pending && !self.locked {
+        if self.permission_guide_pending && !self.locked && !self.choosing_apps {
             self.permission_guide_pending = false;
             let _: () = msg_send![&*self.delegate,performSelector:sel!(permissionGuide:),withObject:None::<&AnyObject>,afterDelay:0.0f64];
         }
@@ -565,6 +571,17 @@ impl State {
         }
         while let Ok(message) = self.rx.try_recv() {
             match message {
+                Message::Catalog(items) => {
+                    self.catalog_pending = false;
+                    self.catalog = items;
+                    for app in &self.catalog {
+                        self.settings
+                            .names
+                            .entry(app.path.clone())
+                            .or_insert_with(|| app.name.clone());
+                    }
+                    self.refresh_preferences_apps();
+                }
                 Message::Dock { items, exact } => {
                     self.dock_pending = false;
                     if !exact && self.dock_exact && !self.settings.wheel.is_empty() {
@@ -580,21 +597,28 @@ impl State {
                     self.refresh_running();
                     let previous_paths = self.active_paths.clone();
                     let previous_slot = self.selected;
-                    let names = items
+                    let mut names: std::collections::BTreeMap<String, String> = items
                         .iter()
                         .map(|i| (i.path.clone(), i.name.clone()))
                         .collect();
+                    for app in &self.catalog {
+                        names
+                            .entry(app.path.clone())
+                            .or_insert_with(|| app.name.clone());
+                    }
                     let paths = items.into_iter().map(|i| i.path).collect::<Vec<_>>();
+                    let preferences_changed =
+                        paths != self.settings.wheel || names != self.settings.names;
                     if paths != self.settings.wheel {
                         self.settings.wheel = paths;
                         self.settings.names = names;
                         if self.active {
                             let slot = crate::model::remap_selection(
                                 &previous_paths,
-                                &self.settings.wheel,
+                                &self.settings.visible_apps(),
                                 previous_slot,
                             );
-                            self.active_paths = self.settings.wheel.clone();
+                            self.active_paths = self.settings.visible_apps();
                             self.active_names = self.settings.names.clone();
                             let view = self.canvas.bounds().size;
                             self.ring = layout::DockLayout::new(
@@ -614,6 +638,7 @@ impl State {
                         }
                         self.icons.retain(|p, _| {
                             self.settings.wheel.contains(p)
+                                || self.settings.added_apps.contains(p)
                                 || (self.active && self.active_paths.contains(p))
                         });
                         self.load_icons();
@@ -623,6 +648,9 @@ impl State {
                             self.active_names = self.settings.names.clone();
                             self.canvas.setNeedsDisplay(true);
                         }
+                    }
+                    if preferences_changed {
+                        self.refresh_preferences_apps();
                     }
                 }
                 Message::DockFailed => {
@@ -646,6 +674,11 @@ impl State {
                 label.setStringValue(&summary);
             }
         }
+        if self.preferences_layout_due > 0. && now >= self.preferences_layout_due {
+            self.preferences_layout_due = 0.;
+            self.refresh_preferences_apps();
+        }
+        self.refresh_preferences_permission();
         let stamp = std::fs::metadata(
             std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
                 .join("Library/Preferences/com.apple.dock.plist"),

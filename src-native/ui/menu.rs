@@ -14,7 +14,7 @@ impl State {
         self.active_paths.get(i).cloned().unwrap_or_default()
     }
     pub(super) unsafe fn load_icons(&mut self) {
-        for p in &self.settings.wheel {
+        for p in &self.settings.all_apps() {
             if !self.icons.contains_key(p) {
                 self.icons.insert(
                     p.clone(),
@@ -41,6 +41,12 @@ impl State {
             self.show_failure();
         }
         self.apply_theme();
+        let keep = self.settings.all_apps();
+        self.icons.retain(|path, _| {
+            keep.contains(path) || (self.closing.is_some() && self.active_paths.contains(path))
+        });
+        self.load_icons();
+        self.refresh_preferences_status();
     }
     pub(super) fn refresh_dock(&mut self) {
         if self.dock_pending || self.locked {
@@ -49,7 +55,7 @@ impl State {
         self.dock_pending = true;
         platform::dock(self.tx.clone());
     }
-    unsafe fn item(
+    pub(super) unsafe fn item(
         &self,
         menu: &NSMenu,
         title: &str,
@@ -70,7 +76,7 @@ impl State {
         menu.addItem(&i);
         i
     }
-    unsafe fn submenu(&self, menu: &NSMenu, title: &str) -> Retained<NSMenu> {
+    pub(super) unsafe fn submenu(&self, menu: &NSMenu, title: &str) -> Retained<NSMenu> {
         let i = self.item(menu, title, -1, false, true);
         let sub = NSMenu::new(MainThreadMarker::new().unwrap());
         sub.setAutoenablesItems(false);
@@ -80,7 +86,7 @@ impl State {
     pub(super) fn dock_summary(&self) -> String {
         format!(
             "{} 个项目 · {}",
-            self.settings.wheel.len(),
+            self.settings.visible_apps().len(),
             if self.dock_pending {
                 "自动更新中"
             } else if self.dock_exact {
@@ -101,7 +107,7 @@ impl State {
         header.addSubview(&icon);
         label(
             &header,
-            "ViGo · Dock 轮盘",
+            "ViGo · 软件轮盘",
             r(50., 47., 224., 23.),
             14.,
             true,
@@ -138,54 +144,15 @@ impl State {
             false,
             true,
         );
-        self.item(m, "试一下轮盘", 20, false, !self.settings.wheel.is_empty());
-        self.item(m, "打开 Dock 设置…", 31, false, true);
-        let keys = self.submenu(m, &format!("呼出键：{}", self.trigger_label()));
-        for (title, tag, check) in [
-            (
-                "V（默认）",
-                100,
-                matches!(self.settings.trigger, Trigger::Key { vk: 86 }),
-            ),
-            ("自定义按键…", 101, false),
-            (
-                "鼠标侧键 4",
-                102,
-                matches!(&self.settings.trigger,Trigger::Mouse(n)if n=="mouse4"),
-            ),
-            (
-                "鼠标侧键 5",
-                103,
-                matches!(&self.settings.trigger,Trigger::Mouse(n)if n=="mouse5"),
-            ),
-        ] {
-            self.item(&keys, title, tag, check, true);
-        }
-        let display = self.submenu(m, "轮盘显示");
-        let size = self.submenu(&display, "轮盘大小");
-        for (name, n) in [("紧凑", 420), ("标准", 520), ("宽松", 640)] {
-            self.item(
-                &size,
-                &format!("{name} · {n} pt"),
-                1000 + n,
-                (self.settings.wheel_size_px - n as f64).abs() < 1.,
-                true,
-            );
-        }
-        let appearance = self.submenu(&display, "外观");
-        for (i, (label, value)) in [("跟随系统", "system"), ("浅色", "light"), ("深色", "dark")]
-            .into_iter()
-            .enumerate()
-        {
-            self.item(
-                &appearance,
-                label,
-                300 + i as isize,
-                self.settings.appearance == value,
-                true,
-            );
-        }
-        self.item(m, "登录时启动", 40, self.settings.launch_at_login, true);
+        self.item(
+            m,
+            "试一下轮盘",
+            20,
+            false,
+            !self.settings.visible_apps().is_empty(),
+        );
+        let settings_item = self.item(m, "设置…", 500, false, true);
+        settings_item.setKeyEquivalent(ns_string!(","));
         m.addItem(&NSMenuItem::separatorItem(MainThreadMarker::new().unwrap()));
         if !self.trusted {
             self.item(m, "开启辅助功能权限…", 21, false, true);
@@ -210,7 +177,7 @@ impl State {
         let q = self.item(m, "退出 ViGo", 3, false, true);
         q.setKeyEquivalent(ns_string!("q"));
     }
-    fn trigger_label(&self) -> String {
+    pub(super) fn trigger_label(&self) -> String {
         match &self.settings.trigger {
             Trigger::Key { vk } => input::key_label(*vk),
             Trigger::Mouse(n) => {
@@ -268,6 +235,16 @@ impl State {
     }
     pub(super) unsafe fn action(&mut self, tag: isize, _sender: &AnyObject) {
         match tag {
+            500 => self.show_preferences(),
+            501 => {
+                self.settings.hidden_apps.clear();
+                self.save();
+            }
+            502 => {
+                self.settings.app_order.clear();
+                self.save();
+                self.refresh_preferences_apps();
+            }
             2 => {
                 self.settings.enabled_on_start = !self.settings.enabled_on_start;
                 self.save();
@@ -373,6 +350,7 @@ impl State {
             "keyboardSubscribed":self.tap_keyboard,
             "keyboardEventsSeen":self.key_events_seen,
             "dockApps":self.settings.wheel.len(),
+            "wheelApps":self.settings.visible_apps().len(),
             "notice":self.notice,
         })
     }

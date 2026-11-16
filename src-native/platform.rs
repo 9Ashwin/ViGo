@@ -194,8 +194,84 @@ pub fn run(args: &[String], timeout: Duration) -> Result<serde_json::Value, Stri
 }
 pub enum Message {
     Dock { items: Vec<DockItem>, exact: bool },
+    Catalog(Vec<DockItem>),
     DockFailed,
     Failure(String),
+}
+pub fn catalog(tx: Sender<Message>) {
+    std::thread::spawn(move || {
+        objc2::rc::autoreleasepool(|_| {
+            use objc2_foundation::{NSBundle, NSString};
+            let mut queue = std::collections::VecDeque::from([
+                (PathBuf::from("/Applications"), 0),
+                (PathBuf::from("/System/Applications"), 0),
+                (
+                    PathBuf::from(std::env::var_os("HOME").unwrap()).join("Applications"),
+                    0,
+                ),
+            ]);
+            let mut seen = std::collections::BTreeSet::new();
+            let mut apps = vec![];
+            let start = Instant::now();
+            while let Some((dir, depth)) = queue.pop_front() {
+                if start.elapsed() > Duration::from_secs(4) || apps.len() > 800 {
+                    break;
+                }
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if entry.file_name().to_string_lossy().starts_with('.') {
+                        continue;
+                    }
+                    if path
+                        .extension()
+                        .is_some_and(|v| v.eq_ignore_ascii_case("app"))
+                    {
+                        let Ok(path) = path.canonicalize() else {
+                            continue;
+                        };
+                        let path = path.to_string_lossy().into_owned();
+                        if !seen.insert(path.clone()) {
+                            continue;
+                        }
+                        if let Some(bundle) = NSBundle::bundleWithPath(&NSString::from_str(&path)) {
+                            if bundle.executableURL().is_none() {
+                                continue;
+                            }
+                            let mut name = PathBuf::from(&path)
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned();
+                            for key in ["CFBundleDisplayName", "CFBundleName"] {
+                                if let Some(value) =
+                                    bundle.objectForInfoDictionaryKey(&NSString::from_str(key))
+                                {
+                                    let label: objc2::rc::Retained<NSString> =
+                                        unsafe { objc2::msg_send![&*value, description] };
+                                    if !label.is_empty() {
+                                        name = label.to_string();
+                                        break;
+                                    }
+                                }
+                            }
+                            apps.push(DockItem {
+                                path,
+                                name,
+                                kind: "app".into(),
+                            });
+                        }
+                    } else if depth < 3 && entry.file_type().is_ok_and(|v| v.is_dir()) {
+                        queue.push_back((path, depth + 1));
+                    }
+                }
+            }
+            apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            let _ = tx.send(Message::Catalog(apps));
+        })
+    });
 }
 pub fn dock(tx: Sender<Message>) {
     std::thread::spawn(

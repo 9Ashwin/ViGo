@@ -1,5 +1,7 @@
 //! All AppKit state stays on the main thread; Dock queries run in isolated workers.
 mod menu;
+mod preferences;
+mod preferences_wheel;
 mod wheel;
 use crate::{
     input::{self, Effect, Gesture},
@@ -93,17 +95,30 @@ impl Canvas {
 define_class!(#[unsafe(super(NSObject))]#[thread_kind=MainThreadOnly]struct Delegate;
  unsafe impl NSObjectProtocol for Delegate{}
  unsafe impl NSApplicationDelegate for Delegate{
-  #[unsafe(method(applicationDidFinishLaunching:))]fn launched(&self,_n:&NSNotification){with(|state|{state.permission_guide_pending = !state.trusted;});}
 
-  #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]fn reopen(&self,_a:&NSApplication,_v:bool)->bool{open_menu();true}
+  #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]fn reopen(&self,_a:&NSApplication,_v:bool)->bool{with(|s|unsafe{s.show_preferences();});true}
   #[unsafe(method(applicationWillTerminate:))]fn quit(&self,_n:&NSNotification){with(|s|s.stop());}
  }
  unsafe impl NSMenuDelegate for Delegate{#[unsafe(method(menuNeedsUpdate:))]fn menu_update(&self,_m:&NSMenu){with(|s|unsafe{s.rebuild_menu()});}}
  unsafe impl NSWindowDelegate for Delegate{
-  #[unsafe(method(windowShouldClose:))]fn close(&self,w:&NSWindow)->bool{with(|s|{s.capturing=false;w.orderOut(None);});false}
-  #[unsafe(method(windowDidResignKey:))]fn resign(&self,_n:&NSNotification){with(|s|unsafe{if s.capturing{s.capturing=false;s.dismiss_capture();}});}
+  #[unsafe(method(windowDidResize:))]fn resized(&self,n:&NSNotification){let object=n.object();with(|s|{if s.preferences.as_ref().is_some_and(|p|object.as_deref().is_some_and(|o|std::ptr::eq(o as *const AnyObject,Retained::as_ptr(&p.window) as *const AnyObject))){s.preferences_layout_due=s.now()+0.1;}});}
+
+  #[unsafe(method(windowShouldClose:))]fn close(&self,w:&NSWindow)->bool{let mut close=false;with(|s|unsafe{close=s.close_preferences_or_capture(w);});close}
+  #[unsafe(method(windowDidResignKey:))]fn resign(&self,n:&NSNotification){let object=n.object();with(|s|unsafe{if s.capturing && s.capture_window.as_ref().is_some_and(|w|object.as_deref().is_some_and(|o|std::ptr::eq(o as *const AnyObject,Retained::as_ptr(w) as *const AnyObject))){s.capturing=false;s.dismiss_capture();}});}
  }
  impl Delegate{
+  #[unsafe(method(releasePreferences:))]fn release_preferences(&self,_sender:Option<&AnyObject>){with(|s|{if s.preferences.as_ref().is_some_and(|p|!p.window.isVisible()){s.preferences=None;}});}
+  #[unsafe(method(settingsPage:))]fn settings_page(&self,sender:&NSButton){with(|s|unsafe{s.preferences_page(sender.tag() as usize);});}
+  #[unsafe(method(settingsLayout:))]fn settings_layout(&self,sender:&NSButton){with(|s|unsafe{s.preferences_layout(sender.tag() as usize);});}
+  #[unsafe(method(settingsCatalogApp:))]fn settings_catalog_app(&self,sender:&NSButton){with(|s|unsafe{s.preferences_catalog_app(sender);});}
+  #[unsafe(method(settingsSearch:))]fn settings_search(&self,_sender:&NSSearchField){with(|s|unsafe{s.refresh_preferences_apps();});}
+  #[unsafe(method(settingsApp:))]fn settings_app(&self,sender:&NSButton){with(|s|unsafe{s.preferences_app(sender);});}
+  #[unsafe(method(settingsMove:))]fn settings_move(&self,sender:&NSButton){with(|s|unsafe{s.preferences_move(sender);});}
+  #[unsafe(method(settingsRemove:))]fn settings_remove(&self,sender:&NSButton){with(|s|unsafe{s.preferences_remove(sender);});}
+  #[unsafe(method(chooseApplications:))]fn choose_applications(&self,_sender:Option<&AnyObject>){unsafe{preferences::choose_applications();}}
+  #[unsafe(method(settingsTrigger:))]fn settings_trigger(&self,sender:&NSPopUpButton){with(|s|unsafe{s.action([100,101,102,103][sender.indexOfSelectedItem().clamp(0,3) as usize],sender);});}
+  #[unsafe(method(settingsSize:))]fn settings_size(&self,sender:&NSSlider){with(|s|unsafe{s.settings.wheel_size_px=sender.doubleValue().round();s.save();});}
+  #[unsafe(method(settingsAppearance:))]fn settings_appearance(&self,sender:&NSPopUpButton){with(|s|unsafe{s.action(300+sender.indexOfSelectedItem(),sender);});}
   #[unsafe(method(permissionGuide:))]fn permission_guide(&self,_sender:Option<&AnyObject>){unsafe{let mtm=MainThreadMarker::new().unwrap();crate::install::welcome(&NSApplication::sharedApplication(mtm),mtm);}}
   #[unsafe(method(action:))]fn action(&self,sender:&AnyObject){let tag:isize=unsafe{msg_send![sender,tag]};with(|s|unsafe{s.action(tag,sender)});}
   #[unsafe(method(tick:))]fn tick(&self,_t:&NSTimer){with(|s|unsafe{s.tick()});}
@@ -117,9 +132,13 @@ struct State {
     overlay: Retained<NSWindow>,
     canvas: Retained<Canvas>,
     glasses: Vec<Retained<NSView>>,
-    status: Retained<NSStatusItem>,
+    _status: Retained<NSStatusItem>,
     status_menu: Retained<NSMenu>,
     capture_window: Option<Retained<NSWindow>>,
+    preferences: Option<preferences::Preferences>,
+    catalog: Vec<crate::model::DockItem>,
+    catalog_pending: bool,
+    preferences_layout_due: f64,
     menu_dock_label: Option<Retained<NSTextField>>,
     screen_frame: NSRect,
     primary_height: f64,
@@ -152,6 +171,7 @@ struct State {
     tether: Tether,
     last_snap: Option<String>,
     capturing: bool,
+    choosing_apps: bool,
     capture_dirty: bool,
     pending_key: platform::Ref,
     capture_release: Option<u16>,
@@ -250,6 +270,9 @@ extern "C" fn event_hook(
         }
         if kind == 10 || kind == 11 {
             s.key_events_seen = true;
+        }
+        if s.choosing_apps {
+            return;
         }
         let code = platform::CGEventGetIntegerValueField(event, 9) as u16;
         let flags = platform::CGEventGetFlags(event);
@@ -376,20 +399,6 @@ extern "C" fn event_hook(
 
 #[link(name = "ServiceManagement", kind = "framework")]
 extern "C" {}
-fn open_menu() {
-    let state = UI.with(|c| {
-        let mut state = c.try_borrow_mut().ok()?;
-        let s = state.as_mut()?;
-        unsafe {
-            s.rebuild_menu();
-        }
-        Some((s.status.clone(), s.status_menu.clone()))
-    });
-    if let Some((status, menu)) = state {
-        #[allow(deprecated)]
-        status.popUpStatusItemMenu(&menu);
-    }
-}
 pub fn run() {
     unsafe {
         let mtm = MainThreadMarker::new().unwrap();
@@ -456,7 +465,7 @@ pub fn run() {
                 icon.setTemplate(true);
                 button.setImage(Some(&icon));
             }
-            button.setToolTip(Some(ns_string!("ViGo · Dock 同步轮盘")));
+            button.setToolTip(Some(ns_string!("ViGo · V 键软件轮盘")));
         }
         let sheet = NSImage::initWithContentsOfFile(
             NSImage::alloc(),
@@ -489,9 +498,13 @@ pub fn run() {
             overlay,
             canvas,
             glasses: vec![],
-            status,
+            _status: status,
             status_menu: menu,
             capture_window: None,
+            preferences: None,
+            catalog: vec![],
+            catalog_pending: false,
+            preferences_layout_due: 0.,
             menu_dock_label: None,
             screen_frame: NSRect::ZERO,
             primary_height: 0.,
@@ -524,6 +537,7 @@ pub fn run() {
             tether: Tether::default(),
             last_snap: None,
             capturing: false,
+            choosing_apps: false,
             capture_dirty: false,
             pending_key: ptr::null_mut(),
             capture_release: None,
@@ -531,7 +545,7 @@ pub fn run() {
             tap_attempted: false,
             tap_retry_at: 0.,
             tap_failures: 0,
-            permission_guide_pending: false,
+            permission_guide_pending: !platform::accessibility_trusted(),
             locked: session_locked(),
             notice,
             toast: None,
@@ -563,11 +577,13 @@ pub fn run() {
             diag_ack: 0,
         };
         s.apply_theme();
+        s.load_icons();
         if s.trusted && !s.locked {
             s.install_hook();
         }
         s.refresh_dock();
         s.rebuild_menu();
+        s.build_application_menu();
         let center = NSWorkspace::sharedWorkspace().notificationCenter();
         for name in [
             NSWorkspaceDidLaunchApplicationNotification,
@@ -622,6 +638,12 @@ impl State {
                 self.diag_ack = v["id"].as_u64().unwrap_or(0);
                 match v["command"].as_str().unwrap_or("") {
                     "refresh" => self.refresh_dock(),
+                    "settings-snapshot" => {
+                        self.preferences_snapshot(&dir);
+                    }
+                    "settings-page" => {
+                        self.preferences_page(v["page"].as_u64().unwrap_or(0) as usize);
+                    }
                     "test-permission" => {
                         platform::simulate_permission(v["trusted"].as_bool().unwrap_or(false))
                     }
@@ -662,7 +684,7 @@ impl State {
                 }
             }
         }
-        let v = serde_json::json!({"input":self.input_report(),"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"permissionGuides":crate::install::guide_count(),"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"softwareOnly":true,"glassCount":self.glasses.iter().filter(|view|!view.isHidden()).count(),"tetherTip":[self.tether.tip().x,self.tether.tip().y],"tetherAlpha":self.tether.alpha(),"tetherSnapped":self.tether.snapped,"emptyBackdrop":true,"notice":self.notice});
+        let v = serde_json::json!({"preferences":self.preferences_diagnostics(),"input":self.input_report(),"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"permissionGuides":crate::install::guide_count(),"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"softwareOnly":true,"glassCount":self.glasses.iter().filter(|view|!view.isHidden()).count(),"tetherTip":[self.tether.tip().x,self.tether.tip().y],"tetherAlpha":self.tether.alpha(),"tetherSnapped":self.tether.snapped,"emptyBackdrop":true,"notice":self.notice});
         let tmp = dir.join("state.tmp");
         let _ = std::fs::write(&tmp, serde_json::to_vec(&v).unwrap());
         let _ = std::fs::rename(tmp, dir.join("state.json"));

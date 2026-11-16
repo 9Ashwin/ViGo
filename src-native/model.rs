@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Trigger {
@@ -20,6 +23,9 @@ pub struct Settings {
     pub wheel: Vec<String>,
     #[serde(skip)]
     pub names: BTreeMap<String, String>,
+    pub hidden_apps: BTreeSet<String>,
+    pub added_apps: Vec<String>,
+    pub app_order: Vec<String>,
     pub launch_at_login: bool,
     pub enabled_on_start: bool,
     pub wheel_size_px: f64,
@@ -32,6 +38,9 @@ impl Default for Settings {
             trigger: Trigger::default(),
             wheel: vec![],
             names: BTreeMap::new(),
+            hidden_apps: BTreeSet::new(),
+            added_apps: vec![],
+            app_order: vec![],
             launch_at_login: false,
             enabled_on_start: true,
             wheel_size_px: 520.,
@@ -40,6 +49,68 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    pub fn visible_apps(&self) -> Vec<String> {
+        self.all_apps()
+            .into_iter()
+            .filter(|path| !self.hidden_apps.contains(path))
+            .collect()
+    }
+    pub fn all_apps(&self) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        let mut apps: Vec<_> = self
+            .wheel
+            .iter()
+            .chain(&self.added_apps)
+            .filter(|p| seen.insert((*p).clone()))
+            .cloned()
+            .collect();
+        let rank: BTreeMap<_, _> = self
+            .app_order
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p, i))
+            .collect();
+        apps.sort_by_key(|p| rank.get(p).copied().unwrap_or(usize::MAX));
+        apps
+    }
+    pub fn add_application(&mut self, path: &str) {
+        if !self.added_apps.iter().any(|p| p == path) {
+            self.added_apps.push(path.to_owned());
+        }
+        self.hidden_apps.remove(path);
+    }
+    pub fn remove_added_application(&mut self, path: &str) {
+        self.added_apps.retain(|p| p != path);
+        if !self.wheel.iter().any(|p| p == path) {
+            self.app_order.retain(|p| p != path);
+            self.hidden_apps.remove(path);
+        }
+    }
+    pub fn move_application(&mut self, path: &str, delta: isize) {
+        let mut apps = self.all_apps();
+        if let Some(index) = apps.iter().position(|p| p == path) {
+            let next = index.saturating_add_signed(delta).min(apps.len() - 1);
+            apps.swap(index, next);
+            self.app_order = apps;
+        }
+    }
+    pub fn swap_applications(&mut self, a: &str, b: &str) {
+        let mut apps = self.all_apps();
+        if let (Some(a), Some(b)) = (
+            apps.iter().position(|p| p == a),
+            apps.iter().position(|p| p == b),
+        ) {
+            apps.swap(a, b);
+            self.app_order = apps;
+        }
+    }
+    pub fn set_app_visible(&mut self, path: &str, visible: bool) {
+        if visible {
+            self.hidden_apps.remove(path);
+        } else {
+            self.hidden_apps.insert(path.to_owned());
+        }
+    }
     pub fn normalize(&mut self) {
         self.version = 3;
         if !self.trigger_supported() {
@@ -114,6 +185,100 @@ pub fn remap_selection(old: &[String], new: &[String], slot: Option<usize>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wheel_editor_swaps_by_app_identity_and_keeps_hidden_apps_and_other_slots() {
+        let mut s = Settings::default();
+        s.wheel = vec!["/A.app".into(), "/Hidden.app".into(), "/B.app".into()];
+        s.set_app_visible("/Hidden.app", false);
+        s.add_application("/Manual.app");
+        s.swap_applications("/A.app", "/Manual.app");
+        assert_eq!(s.visible_apps(), vec!["/Manual.app", "/B.app", "/A.app"]);
+        assert_eq!(s.all_apps()[1], "/Hidden.app");
+        let before = s.app_order.clone();
+        s.swap_applications("/Gone.app", "/B.app");
+        assert_eq!(s.app_order, before);
+    }
+    #[test]
+    fn manual_apps_are_deduplicated_with_dock_and_keep_the_saved_order() {
+        let mut s = Settings::default();
+        s.wheel = vec!["/A.app".into(), "/B.app".into()];
+        s.add_application("/B.app");
+        s.add_application("/Manual.app");
+        s.add_application("/Manual.app");
+        assert_eq!(s.visible_apps(), vec!["/A.app", "/B.app", "/Manual.app"]);
+        s.move_application("/Manual.app", -1);
+        s.move_application("/Manual.app", -1);
+        let mut loaded: Settings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        loaded.wheel = vec!["/B.app".into(), "/New.app".into(), "/A.app".into()];
+        assert_eq!(
+            loaded.visible_apps(),
+            vec!["/Manual.app", "/A.app", "/B.app", "/New.app"]
+        );
+        loaded.app_order.clear();
+        assert_eq!(
+            loaded.visible_apps(),
+            vec!["/B.app", "/New.app", "/A.app", "/Manual.app"]
+        );
+    }
+    #[test]
+    fn removing_a_manual_reference_never_removes_the_dock_entry() {
+        let mut s = Settings::default();
+        s.wheel = vec!["/A.app".into()];
+        s.add_application("/A.app");
+        s.add_application("/Manual.app");
+        s.remove_added_application("/A.app");
+        assert_eq!(s.visible_apps(), vec!["/A.app", "/Manual.app"]);
+        s.remove_added_application("/Manual.app");
+        assert_eq!(s.visible_apps(), vec!["/A.app"]);
+        s.set_app_visible("/A.app", false);
+        s.add_application("/A.app");
+        assert_eq!(s.visible_apps(), vec!["/A.app"]);
+    }
+    #[test]
+    fn exclusions_survive_save_and_old_settings_show_everything() {
+        let mut s = Settings::default();
+        s.wheel = vec!["/A.app".into(), "/B.app".into()];
+        s.set_app_visible("/B.app", false);
+        let json = serde_json::to_string(&s).unwrap();
+        let mut loaded: Settings = serde_json::from_str(&json).unwrap();
+        loaded.wheel = s.wheel.clone();
+        assert_eq!(loaded.visible_apps(), vec!["/A.app"]);
+        let mut old: Settings = serde_json::from_str(r#"{"version":3}"#).unwrap();
+        old.wheel = s.wheel;
+        assert_eq!(old.visible_apps().len(), 2);
+    }
+    #[test]
+    fn live_dock_order_and_new_apps_follow_exclusions_without_forgetting_removed_apps() {
+        let mut s = Settings::default();
+        s.set_app_visible("/B.app", false);
+        s.wheel = vec![
+            "/C.app".into(),
+            "/B.app".into(),
+            "/A.app".into(),
+            "/New.app".into(),
+        ];
+        assert_eq!(s.visible_apps(), vec!["/C.app", "/A.app", "/New.app"]);
+        s.wheel.retain(|p| p != "/B.app");
+        s.normalize();
+        s.wheel.insert(0, "/B.app".into());
+        assert_eq!(s.visible_apps(), vec!["/C.app", "/A.app", "/New.app"]);
+        s.hidden_apps.clear();
+        assert_eq!(s.visible_apps(), s.wheel);
+    }
+    #[test]
+    fn hiding_the_selected_app_cancels_identity_and_all_apps_can_be_restored() {
+        let mut s = Settings::default();
+        s.wheel = vec!["/A.app".into(), "/B.app".into()];
+        let old = s.visible_apps();
+        s.set_app_visible("/A.app", false);
+        assert_eq!(remap_selection(&old, &s.visible_apps(), Some(0)), None);
+        assert_eq!(remap_selection(&old, &s.visible_apps(), Some(1)), Some(0));
+        s.set_app_visible("/B.app", false);
+        assert!(s.visible_apps().is_empty());
+        s.set_app_visible("/A.app", true);
+        assert_eq!(s.visible_apps(), vec!["/A.app"]);
+    }
     #[test]
     fn custom_lists_are_not_imported_or_saved() {
         let s: Settings = serde_json::from_str(
