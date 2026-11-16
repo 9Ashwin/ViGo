@@ -189,7 +189,7 @@ impl State {
                         .is_some_and(|s| s.to_string_lossy().to_lowercase().contains(&query))
             })
             .collect();
-        apps.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        apps.sort_by_key(|a| a.1.to_lowercase());
         p.catalog_label.setStringValue(&NSString::from_str(&format!(
             "已安装的软件 · {}",
             apps.len()
