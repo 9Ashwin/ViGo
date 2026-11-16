@@ -14,6 +14,7 @@ cp target/release/ViGo "$app/Contents/MacOS/ViGo"
 /usr/bin/strip -x "$app/Contents/MacOS/ViGo"
 cp native/system-helper/build/system-helper "$app/Contents/Resources/"
 cp assets/mascot-sheet.png build/trayTemplate.png build/trayTemplate@2x.png "$app/Contents/Resources/"
+cp assets/companion-browser.html "$app/Contents/Resources/"
 rm -f "$app/Contents/Resources"/ViGo-*.icns "$app/Contents/Resources/icon.icns"
 cp build/icon.icns "$app/Contents/Resources/$icon_name"
 cp LICENSE THIRD_PARTY_LICENSES.md "$app/Contents/Resources/"
@@ -31,6 +32,11 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>CFBundleDisplayName</key><string>ViGo</string>
 <key>CFBundleExecutable</key><string>ViGo</string>
 <key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLName</key><string>com.vigo.desktop.companion</string>
+<key>CFBundleURLSchemes</key><array><string>vigo</string></array>
+<key>CFBundleTypeRole</key><string>Viewer</string>
+</dict></array>
 <key>CFBundleIconFile</key><string>$icon_name</string>
 <key>CFBundleShortVersionString</key><string>$version</string>
 <key>CFBundleVersion</key><string>$build_version</string>

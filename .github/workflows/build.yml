@@ -25,6 +25,7 @@ jobs:
           cargo fmt --check
           cargo test --locked
           cargo clippy --locked --all-features -- -D warnings
+          node tools/native/verify-companion-browser.mjs
       - name: Build app
         env:
           VIGO_SIGN_IDENTITY: '-'

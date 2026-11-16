@@ -193,7 +193,7 @@ pub fn command_line(args: &[String]) -> Option<std::process::ExitCode> {
         }
     })
 }
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 96
         && id

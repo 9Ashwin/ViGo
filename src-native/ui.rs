@@ -100,6 +100,7 @@ define_class!(#[unsafe(super(NSObject))]#[thread_kind=MainThreadOnly]struct Dele
 
   #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]fn reopen(&self,_a:&NSApplication,_v:bool)->bool{with(|s|unsafe{s.show_preferences();});true}
   #[unsafe(method(applicationWillTerminate:))]fn quit(&self,_n:&NSNotification){with(|s|s.stop());}
+  #[unsafe(method(application:openURLs:))]fn open_urls(&self,_app:&NSApplication,urls:&NSArray<NSURL>){mascot::queue_browser_imports(urls);}
  }
  unsafe impl NSMenuDelegate for Delegate{#[unsafe(method(menuNeedsUpdate:))]fn menu_update(&self,_m:&NSMenu){with(|s|unsafe{s.rebuild_menu()});}}
  unsafe impl NSWindowDelegate for Delegate{
@@ -112,7 +113,7 @@ define_class!(#[unsafe(super(NSObject))]#[thread_kind=MainThreadOnly]struct Dele
   #[unsafe(method(releasePreferences:))]fn release_preferences(&self,_sender:Option<&AnyObject>){with(|s|{if s.preferences.as_ref().is_some_and(|p|!p.window.isVisible()){s.preferences=None;}});}
   #[unsafe(method(mascotSelected:))]fn mascot_selected(&self,sender:&NSPopUpButton){with(|s|unsafe{s.mascot_selected(sender);});}
   #[unsafe(method(mascotImport:))]fn mascot_import(&self,_sender:Option<&AnyObject>){unsafe{mascot::choose_file();}}
-  #[unsafe(method(mascotWebsite:))]fn mascot_website(&self,_sender:Option<&AnyObject>){unsafe{mascot::choose_website();}}
+  #[unsafe(method(mascotWebsite:))]fn mascot_website(&self,_sender:Option<&AnyObject>){unsafe{mascot::choose_website(None);}}
   #[unsafe(method(mascotTick:))]fn mascot_tick(&self,_timer:&NSTimer){with(|s|unsafe{s.mascot_tick();});}
   #[unsafe(method(settingsPage:))]fn settings_page(&self,sender:&NSButton){with(|s|unsafe{s.preferences_page(sender.tag() as usize);});}
   #[unsafe(method(settingsLayout:))]fn settings_layout(&self,sender:&NSButton){with(|s|unsafe{s.preferences_layout(sender.tag() as usize);});}
@@ -127,7 +128,7 @@ define_class!(#[unsafe(super(NSObject))]#[thread_kind=MainThreadOnly]struct Dele
   #[unsafe(method(settingsAppearance:))]fn settings_appearance(&self,sender:&NSPopUpButton){with(|s|unsafe{s.action(300+sender.indexOfSelectedItem(),sender);});}
   #[unsafe(method(permissionGuide:))]fn permission_guide(&self,_sender:Option<&AnyObject>){unsafe{let mtm=MainThreadMarker::new().unwrap();crate::install::welcome(&NSApplication::sharedApplication(mtm),mtm);}}
   #[unsafe(method(action:))]fn action(&self,sender:&AnyObject){let tag:isize=unsafe{msg_send![sender,tag]};with(|s|unsafe{s.action(tag,sender)});}
-  #[unsafe(method(tick:))]fn tick(&self,_t:&NSTimer){with(|s|unsafe{s.tick()});}
+  #[unsafe(method(tick:))]fn tick(&self,_t:&NSTimer){unsafe{mascot::process_browser_import();}with(|s|unsafe{s.tick()});}
   #[unsafe(method(dockChanged:))]fn dock_changed(&self,n:&NSNotification){let regular=unsafe{n.userInfo().and_then(|d|d.objectForKey(NSWorkspaceApplicationKey)).is_some_and(|a|{let policy:isize=msg_send![&*a,activationPolicy];policy==0})};if regular{with(|s|{s.dock_due=s.now()+0.35;});}}
  }
 );

@@ -3,6 +3,61 @@ use crate::mascot as assets;
 use objc2::DefinedClass;
 use std::{cell::Cell, rc::Rc};
 
+thread_local! {
+    static BROWSER_IMPORTS: RefCell<std::collections::VecDeque<Result<String, String>>> = const { RefCell::new(std::collections::VecDeque::new()) };
+}
+
+pub(super) fn queue_browser_imports(urls: &NSArray<NSURL>) {
+    for url in urls.iter().take(4) {
+        let value = url
+            .absoluteString()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let source = crate::companion_link::website(&value);
+        BROWSER_IMPORTS.with(|queue| {
+            let mut queue = queue.borrow_mut();
+            if queue.len() < 4 && !queue.contains(&source) {
+                queue.push_back(source);
+            }
+        });
+    }
+}
+
+// Run outside State's RefCell borrow: a modal confirmation starts a nested run loop.
+pub(super) unsafe fn process_browser_import() {
+    let mut ready = false;
+    with(|s| {
+        ready = !s.choosing_apps
+            && !s.mascot_import_pending
+            && !s.capturing
+            && !s.locked
+            && !s.preferences_interacting
+            && !s.active;
+    });
+    if !ready {
+        return;
+    }
+    let Some(source) = BROWSER_IMPORTS.with(|q| q.borrow_mut().pop_front()) else {
+        return;
+    };
+    match source {
+        Ok(url) => choose_website(Some(&url)),
+        Err(error) => {
+            with(|s| {
+                s.notice = error;
+                s.show_failure();
+            });
+        }
+    }
+}
+
+pub(super) unsafe fn open_browser_guide() {
+    let url = NSURL::fileURLWithPath(&NSString::from_str(
+        &platform::resource("companion-browser.html").to_string_lossy(),
+    ));
+    NSWorkspace::sharedWorkspace().openURL(&url);
+}
+
 #[derive(Debug)]
 pub(super) struct MascotImage {
     pub asset: assets::Asset,
@@ -391,31 +446,43 @@ pub(super) unsafe fn choose_file() {
         }
     });
 }
-pub(super) unsafe fn choose_website() {
+pub(super) unsafe fn choose_website(source: Option<&str>) {
     with(|s| {
         s.close_wheel();
         s.gesture.reset();
         s.choosing_apps = true;
+        s.show_preferences();
+        s.preferences_page(3);
     });
     let mtm = MainThreadMarker::new().unwrap();
     let alert = NSAlert::new(mtm);
-    alert.setMessageText(ns_string!("从 Codex Pets 导入"));
+    alert.setMessageText(ns_string!("导入桌面伙伴到 ViGo"));
     alert.setInformativeText(ns_string!(
-        "粘贴宠物详情链接。素材会保存在本机，默认小猫仍可随时恢复。"
+        "来源：codex-pets.net。确认后下载并使用，默认小猫随时可以恢复。也可浏览素材库，或设置浏览器书签一键跳回 ViGo。"
     ));
     alert.addButtonWithTitle(ns_string!("导入并使用"));
     alert.addButtonWithTitle(ns_string!("取消"));
+    alert.addButtonWithTitle(ns_string!("浏览素材库 ↗"));
+    alert.addButtonWithTitle(ns_string!("启用浏览器一键导入 ↗"));
     let input = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(r(0., 0., 420., 28.)));
     input.setPlaceholderString(Some(ns_string!(
         "https://codex-pets.net/#/pets/aegis-sentinel"
     )));
+    if let Some(source) = source {
+        input.setStringValue(&NSString::from_str(source));
+    }
     alert.setAccessoryView(Some(&input));
-    let accepted = alert.runModal() == NSAlertFirstButtonReturn;
+    let response = alert.runModal();
     let value = input.stringValue().to_string();
     with(|s| {
         s.choosing_apps = false;
-        if accepted {
+        if response == NSAlertFirstButtonReturn {
             s.import_mascot(value, true);
         }
     });
+    if response == NSAlertThirdButtonReturn {
+        super::open_url("https://codex-pets.net/");
+    } else if response == NSAlertThirdButtonReturn + 1 {
+        open_browser_guide();
+    }
 }

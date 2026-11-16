@@ -19,6 +19,9 @@ try:
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     assert info['CFBundleIdentifier'] == 'com.vigo.desktop'
     assert info['CFBundlePackageType'] == 'APPL'
+    assert info['CFBundleURLTypes'][0]['CFBundleURLSchemes'] == ['vigo']
+    guide = app / 'Contents/Resources/companion-browser.html'
+    assert 'vigo://companion/import/' in guide.read_text()
     assert (app / 'Contents/PkgInfo').read_bytes() == b'APPL????'
     assert os.stat(app / 'Contents/MacOS/ViGo').st_mode & 0o111
     assert os.readlink(mount / '应用程序') == '/Applications'
@@ -30,7 +33,7 @@ try:
         assert store['应用程序']['Iloc'] == (474, 192)
         assert store['.']['icvp']['backgroundType'] == 2
         assert store['.']['icvp']['iconSize'] == 96
-    print(json.dumps({'version': info['CFBundleShortVersionString'], 'mountedSignature': True, 'iconSizes': True, 'applicationsLink': True, 'installationLayout': True}))
+    print(json.dumps({'version': info['CFBundleShortVersionString'], 'mountedSignature': True, 'iconSizes': True, 'applicationsLink': True, 'installationLayout': True, 'browserImportEntry': True}))
 finally:
     if attached:
         subprocess.run(['hdiutil', 'detach', str(mount)], check=True, stdout=subprocess.DEVNULL)

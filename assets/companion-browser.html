@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>导入到 ViGo · 桌面伙伴</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f5f3ef; --card:#fffefa; --ink:#312c27; --muted:#797168; --line:#e8e1d8; --accent:#80583d; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  main { max-width:800px; margin:64px auto; padding:0 28px; } header { display:flex; align-items:center; gap:24px; margin-bottom:32px; }
+  .cat { flex:none; width:96px; height:104px; background:url('mascot-sheet.png') 0 0 / 768px 1144px; }
+  .eyebrow { color:var(--accent); font-size:12px; font-weight:650; letter-spacing:.12em; } h1 { font-size:34px; letter-spacing:-1px; margin:4px 0; line-height:1.4; }
+  p { margin:8px 0; } .muted,small { color:var(--muted); } section { padding:28px 32px; border:1px solid var(--line); background:var(--card); border-radius:24px; margin:18px 0; }
+  h2 { font-size:19px; margin:0 0 12px; } .bookmark { display:inline-flex; align-items:center; gap:10px; padding:12px 25px; margin:14px 0; border-radius:999px; color:#fff; background:var(--accent); text-decoration:none; font-weight:650; box-shadow:0 5px 12px #62412418; cursor:grab; }
+  .bookmark span { font-size:20px; } a { color:var(--accent); text-underline-offset:4px; } button { font:inherit; cursor:pointer; padding:7px 14px; border:1px solid var(--line); border-radius:10px; background:var(--bg); color:var(--ink); }
+  .steps { display:grid; gap:18px; padding:0; list-style:none; counter-reset:step; } .steps li { display:flex; gap:16px; align-items:flex-start; counter-increment:step; }
+  .steps li::before { content:counter(step); flex:none; display:grid; place-items:center; width:28px; height:28px; border-radius:50%; background:var(--bg); color:var(--accent); font-weight:650; }
+  .row { display:flex; align-items:center; flex-wrap:wrap; gap:16px; margin-top:14px; } details { border-top:1px solid var(--line); margin-top:20px; padding-top:14px; } summary { cursor:pointer; color:var(--muted); }
+  textarea { width:100%; height:92px; margin-top:12px; border:1px solid var(--line); border-radius:10px; padding:10px; color:var(--ink); background:var(--bg); font:12px/1.5 ui-monospace,monospace; resize:vertical; } footer { font-size:12px; color:var(--muted); padding:8px; }
+  @media(prefers-color-scheme:dark) { :root { --bg:#201e1b; --card:#2b2723; --ink:#eee8e0; --muted:#b3a89b; --line:#433a32; --accent:#bb8e6b; } }
+  @media(max-width:600px) { main { margin:32px auto; padding:0 18px; } section { padding:22px; } h1 { font-size:28px; } header { gap:12px; } }
+</style>
+<main>
+  <header><div class="cat" aria-hidden="true"></div><div><div class="eyebrow">VIGO · 桌面伙伴</div><h1>看中了，就带回桌面。</h1><p class="muted">设置一次书签，以后在浏览器点一下就能导入。</p></div></header>
+  <section>
+    <h2>把这个按钮拖到浏览器书签栏</h2>
+    <p class="muted">支持常见桌面浏览器。书签栏隐藏时，可按 ⌘⇧B 显示。</p>
+    <a id="bookmark" class="bookmark" draggable="true"><span aria-hidden="true">↗</span> 导入到 ViGo</a>
+    <p><small>请拖到书签栏保存，然后在 Codex Pets 伙伴详情页点击这个书签。</small></p>
+    <details><summary>无法拖动？手动添加书签</summary><p>新建书签，名称填“导入到 ViGo”，网址填入下方完整代码。</p><textarea id="code" readonly aria-label="ViGo 导入书签代码"></textarea><button id="copy" type="button">复制书签代码</button><span id="copy-status" role="status"></span></details>
+  </section>
+  <section>
+    <h2>下次导入，只需这三步</h2>
+    <ol class="steps"><li><div><a href="https://codex-pets.net/" target="_blank" rel="noopener noreferrer">打开 Codex Pets 素材库 ↗</a><br><small>选择伙伴，进入它的详情页。</small></div></li><li><div>点击书签栏的“导入到 ViGo”<br><small>浏览器可能询问是否打开 ViGo，可按需允许本站以后直接打开。</small></div></li><li><div>在 ViGo 点击“导入并使用”<br><small>应用会下载并切换；取消会保留当前伙伴，默认小猫也一直保留。</small></div></li></ol>
+    <div class="row"><a id="try" href="vigo://companion/import/pet-6af8bc5f4c0c81918e60784c437b7a4a">试试跳转：导入 Bristle ↗</a><small>仅打开确认窗口，不会直接替换。</small></div>
+  </section>
+  <footer>需要 ViGo 0.7.2 或更高版本。本指南保存在应用内，无需安装浏览器扩展。书签只读取当前页面的网址；网站的“Install in Codex”仍然打开 Codex。</footer>
+</main>
+<script>
+  // Self-contained because a saved bookmark runs on the community website, not this page.
+  function importCurrentPet() {
+    const page = new URL(location.href);
+    if (page.protocol !== 'https:' || page.hostname !== 'codex-pets.net' || page.port) {
+      alert('请先打开 codex-pets.net 的桌面伙伴详情页。');
+      return;
+    }
+    const route = page.hash.startsWith('#/pets/') ? page.hash.slice(1) : page.pathname;
+    const match = route.match(/^\/pets\/([A-Za-z0-9_-]{1,96})(?:[/?#]|$)/);
+    if (!match) { alert('请先选择一位伙伴，进入它的详情页再点击书签。'); return; }
+    location.href = 'vigo://companion/import/' + match[1];
+  }
+  const bookmark = 'javascript:(' + importCurrentPet.toString() + ')()';
+  const link = document.querySelector('#bookmark');
+  link.setAttribute('href', bookmark);
+  link.addEventListener('click', event => { event.preventDefault(); alert('把这个按钮拖到浏览器书签栏，再到 Codex Pets 详情页使用。也可先点击下方的 Bristle 试用链接。'); });
+  document.querySelector('#code').value = bookmark;
+  document.querySelector('#copy').addEventListener('click', async () => {
+    const code = document.querySelector('#code');
+    try { await navigator.clipboard.writeText(bookmark); document.querySelector('#copy-status').textContent = ' 已复制'; }
+    catch { code.focus(); code.select(); document.querySelector('#copy-status').textContent = ' 请按 ⌘C 复制'; }
+  });
+</script>
+</html>

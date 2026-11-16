@@ -1,3 +1,4 @@
+mod companion_link;
 mod input;
 mod install;
 mod layout;
