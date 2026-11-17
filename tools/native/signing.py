@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,14 @@ def requirement():
     return f'identifier "{APP_ID}" and certificate leaf = H"{fingerprint()}"'
 
 
+def remove_keychain(keychain):
+    # Preserve unrelated keychains, including any added by another local tool during the build.
+    current = shlex.split(run(['/usr/bin/security', 'list-keychains', '-d', 'user']))
+    remaining = [path for path in current if Path(path).resolve() != keychain.resolve()]
+    run(['/usr/bin/security', 'list-keychains', '-d', 'user', '-s', *remaining])
+    subprocess.run(['/usr/bin/security', 'delete-keychain', str(keychain)], capture_output=True)
+
+
 def setup():
     encoded = os.environ.get('VIGO_RELEASE_P12_BASE64', '')
     password = os.environ.get('VIGO_RELEASE_P12_PASSWORD', '')
@@ -51,6 +60,7 @@ def setup():
     import secrets
     keychain_password = secrets.token_hex(32)
     try:
+        previous = shlex.split(run(['/usr/bin/security', 'list-keychains', '-d', 'user']))
         run(['/usr/bin/security', 'create-keychain', '-p', keychain_password, str(keychain)])
         run(['/usr/bin/security', 'unlock-keychain', '-p', keychain_password, str(keychain)])
         run(['/usr/bin/security', 'set-keychain-settings', '-lut', '21600', str(keychain)])
@@ -58,14 +68,16 @@ def setup():
              '-T', '/usr/bin/codesign'])
         run(['/usr/bin/security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:',
              '-s', '-k', keychain_password, str(keychain)])
+        # macOS runner versions differ: --keychain alone doesn't always find the identity's private key.
+        run(['/usr/bin/security', 'list-keychains', '-d', 'user', '-s', str(keychain), *previous])
         identities = run(['/usr/bin/security', 'find-identity', '-p', 'codesigning', str(keychain)])
         if fingerprint() not in identities.lower():
             raise RuntimeError('Secret identity does not match the pinned public certificate')
         with Path(os.environ['GITHUB_ENV']).open('a') as stream:
-            stream.write(f'VIGO_SIGN_IDENTITY={fingerprint()}\nVIGO_SIGN_KEYCHAIN={keychain}\nVIGO_RELEASE_SIGNED=1\n')
+            stream.write(f'VIGO_SIGN_IDENTITY={fingerprint().upper()}\nVIGO_SIGN_KEYCHAIN={keychain}\nVIGO_RELEASE_SIGNED=1\n')
         print('Fixed ViGo release identity imported into an isolated temporary keychain.')
     except Exception:
-        subprocess.run(['/usr/bin/security', 'delete-keychain', str(keychain)], capture_output=True)
+        remove_keychain(keychain)
         shutil.rmtree(directory)
         raise
     finally:
@@ -80,7 +92,7 @@ def cleanup():
     parent = Path(os.environ['RUNNER_TEMP']).resolve()
     if not keychain.is_relative_to(parent) or not keychain.parent.name.startswith('vigo-signing-'):
         raise RuntimeError('Refusing to remove an unrelated keychain')
-    subprocess.run(['/usr/bin/security', 'delete-keychain', str(keychain)], capture_output=True)
+    remove_keychain(keychain)
     shutil.rmtree(keychain.parent, ignore_errors=True)
 
 
