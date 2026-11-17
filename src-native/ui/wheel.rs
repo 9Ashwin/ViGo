@@ -5,6 +5,19 @@ impl State {
         self.mascot.draw(cx, cy, size, row, frame);
     }
     pub(super) unsafe fn draw_wheel(&self) {
+        NSGraphicsContext::saveGraphicsState_class();
+        if let Some(frame) = self
+            .windows
+            .frame
+            .filter(|_| self.settings.show_window_list)
+        {
+            // Exclude the local popover from wheel artwork; native glass shows desktop,
+            // rather than sharp neighbouring app icons shining through the menu rows.
+            let clip = NSBezierPath::bezierPathWithRect(self.canvas.bounds());
+            clip.appendBezierPathWithRoundedRect_xRadius_yRadius(rect(frame), 14., 14.);
+            clip.setWindingRule(NSWindingRule::EvenOdd);
+            clip.addClip();
+        }
         let (cx, cy) = self.center;
         let ink = color("labelColor");
         self.draw_tether();
@@ -151,6 +164,8 @@ impl State {
             &ink,
         );
         NSGraphicsContext::restoreGraphicsState_class();
+        NSGraphicsContext::restoreGraphicsState_class();
+        self.draw_windows();
     }
     pub(super) fn node_pose(&self, index: usize) -> (f64, f64, f64) {
         let node = &self.ring.nodes[index];
@@ -411,6 +426,7 @@ impl State {
         self.closing = None;
         self.opened = self.now();
         self.selected = None;
+        self.windows.reset();
         self.last_snap = None;
         self.tether.reset(
             Point::new(
@@ -428,6 +444,8 @@ impl State {
     }
     pub(super) unsafe fn close_wheel(&mut self) {
         self.active = false;
+        self.windows.reset();
+        self.sync_window_glass();
         self.armed = false;
         self.trial = None;
         if self.overlay.isVisible() {
@@ -473,6 +491,17 @@ impl State {
             self.canvas.setNeedsDisplay(true);
             return;
         }
+        if self.settings.show_window_list && self.windows.contains((x, y)) {
+            self.windows.point((x, y));
+            self.armed = true;
+            self.canvas.setNeedsDisplay(true);
+            return;
+        }
+        if self.windows.frame.is_some() {
+            self.windows.reset();
+            self.sync_window_glass();
+            self.canvas.setNeedsDisplay(true);
+        }
         if self.selected.is_some() && dx.hypot(dy) > self.ring.outer - 4. {
             self.armed = dx.hypot(dy) <= self.ring.outer + 70.;
             return;
@@ -491,6 +520,16 @@ impl State {
             return;
         }
         if let Some(i) = self.selected {
+            if self.settings.show_window_list {
+                if let Some(window) = self
+                    .windows
+                    .choice()
+                    .filter(|_| self.windows.path.as_deref() == Some(self.path_at(i).as_str()))
+                {
+                    platform::activate_window(self.path_at(i), window.clone(), self.tx.clone());
+                    return;
+                }
+            }
             self.open_target(&self.path_at(i));
         }
     }
@@ -555,6 +594,24 @@ impl State {
         }
         while let Ok(message) = self.rx.try_recv() {
             match message {
+                Message::Windows { generation, items } => {
+                    self.window_query_pending = false;
+                    if self.active && self.settings.show_window_list {
+                        if let Some(index) = self.selected {
+                            let pose = self.node_pose(index);
+                            if (self.pointer.0 - pose.0).hypot(self.pointer.1 - pose.1)
+                                <= pose.2 * 1.4
+                                && self.windows.accept(generation, items)
+                            {
+                                let size = self.canvas.bounds().size;
+                                self.windows
+                                    .place(pose, self.pointer, size.width, size.height);
+                                self.sync_window_glass();
+                                self.canvas.setNeedsDisplay(true);
+                            }
+                        }
+                    }
+                }
                 Message::Mascot(result) => {
                     self.mascot_import_pending = false;
                     match result {
@@ -711,6 +768,7 @@ impl State {
             self.moved = false;
             self.move_pointer();
         }
+        self.tick_windows();
         if self.layout_dirty {
             self.layout_dirty = false;
             self.sync_glass();

@@ -35,6 +35,7 @@ pub(super) struct Preferences {
     appearance: Retained<NSPopUpButton>,
     enabled: Retained<NSButton>,
     login: Retained<NSButton>,
+    window_list: Retained<NSButton>,
     permission: Retained<NSTextField>,
 }
 struct AppRow {
@@ -710,18 +711,30 @@ impl State {
                 r(440., 399., 200., 30.),
                 sel!(settingsAppearance:),
             );
-            card(general, r(0., 238., 660., 126.));
+            card(general, r(0., 192., 660., 172.));
             let enabled = self.preferences_button(general, "启用 ViGo", r(20., 316., 570., 26.), 2);
             enabled.setButtonType(NSButtonType::Switch);
             enabled.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
             let login = self.preferences_button(general, "登录时启动", r(20., 270., 570., 26.), 40);
             login.setButtonType(NSButtonType::Switch);
             login.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
-            let permission = text(general, "", r(0., 190., 660., 22.), 12., false, true);
+            let window_list =
+                self.preferences_button(general, "悬停显示窗口列表", r(20., 224., 570., 26.), 41);
+            window_list.setButtonType(NSButtonType::Switch);
+            window_list.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
+            text(
+                general,
+                "按住呼出键悬停软件，滚轮或移动选窗口。",
+                r(40., 198., 590., 20.),
+                12.,
+                false,
+                true,
+            );
+            let permission = text(general, "", r(0., 158., 660., 22.), 12., false, true);
             permission.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
-            self.preferences_button(general, "辅助功能…", r(0., 140., 130., 30.), 21)
+            self.preferences_button(general, "辅助功能…", r(0., 118., 130., 30.), 21)
                 .setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
-            self.preferences_button(general, "复制诊断信息", r(144., 140., 140., 30.), 23)
+            self.preferences_button(general, "复制诊断信息", r(144., 118., 140., 30.), 23)
                 .setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
             card(general, r(0., 12., 660., 88.));
             text(
@@ -771,6 +784,7 @@ impl State {
                 appearance,
                 enabled,
                 login,
+                window_list,
                 permission,
             });
         }
@@ -1017,6 +1031,8 @@ impl State {
             .setState(if self.settings.enabled_on_start { 1 } else { 0 });
         p.login
             .setState(if self.settings.launch_at_login { 1 } else { 0 });
+        p.window_list
+            .setState(if self.settings.show_window_list { 1 } else { 0 });
         p.size.setDoubleValue(self.settings.wheel_size_px);
         p.size_label.setStringValue(&NSString::from_str(&format!(
             "{} pt",

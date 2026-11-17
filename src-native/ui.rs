@@ -5,6 +5,7 @@ mod preferences;
 mod preferences_drag;
 mod preferences_wheel;
 mod wheel;
+mod windows;
 use crate::{
     input::{self, Effect, Gesture},
     layout::{self, Rect},
@@ -40,6 +41,44 @@ fn with(f: impl FnOnce(&mut State)) {
 }
 fn rect(r: Rect) -> NSRect {
     NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.w, r.h))
+}
+#[cfg(feature = "diagnostics")]
+unsafe fn capture_wheel_snapshot() {
+    let mut target = None;
+    with(|s| {
+        if let Some(dir) = s.diag.clone() {
+            let bounds = if let Some(f) = s.windows.frame {
+                let (x, y, side) = s.windows.icon;
+                let left = f.x.min(x - side / 2.) - 18.;
+                let top = f.y.min(y - side / 2.) - 18.;
+                rect(r(
+                    left,
+                    top,
+                    f.x.max(x + side / 2.).max(f.x + f.w) - left + 18.,
+                    (f.y + f.h).max(y + side / 2.) - top + 18.,
+                ))
+            } else {
+                s.canvas.bounds()
+            };
+            target = Some((s.canvas.clone(), dir, bounds));
+        }
+    });
+    if let Some((canvas, dir, bounds)) = target {
+        if let Some(rep) = canvas.bitmapImageRepForCachingDisplayInRect(bounds) {
+            canvas.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
+            if let Some(data) = rep.representationUsingType_properties(
+                NSBitmapImageFileType::PNG,
+                &NSDictionary::new(),
+            ) {
+                let _ = data.writeToURL_atomically(
+                    &NSURL::fileURLWithPath(&NSString::from_str(
+                        &dir.join("wheel.png").to_string_lossy(),
+                    )),
+                    true,
+                );
+            }
+        }
+    }
 }
 fn r(x: f64, y: f64, w: f64, h: f64) -> Rect {
     Rect { x, y, w, h }
@@ -110,6 +149,8 @@ define_class!(#[unsafe(super(NSObject))]#[thread_kind=MainThreadOnly]struct Dele
   #[unsafe(method(windowDidResignKey:))]fn resign(&self,n:&NSNotification){let object=n.object();with(|s|unsafe{if s.capturing && s.capture_window.as_ref().is_some_and(|w|object.as_deref().is_some_and(|o|std::ptr::eq(o as *const AnyObject,Retained::as_ptr(w) as *const AnyObject))){s.capturing=false;s.dismiss_capture();}});}
  }
  impl Delegate{
+  #[cfg(feature="diagnostics")]
+  #[unsafe(method(wheelSnapshot:))]fn wheel_snapshot(&self,_sender:Option<&AnyObject>){unsafe{capture_wheel_snapshot();}}
   #[unsafe(method(releasePreferences:))]fn release_preferences(&self,_sender:Option<&AnyObject>){with(|s|{if s.preferences.as_ref().is_some_and(|p|!p.window.isVisible()){s.preferences=None;}});}
   #[unsafe(method(mascotSelected:))]fn mascot_selected(&self,sender:&NSPopUpButton){with(|s|unsafe{s.mascot_selected(sender);});}
   #[unsafe(method(mascotImport:))]fn mascot_import(&self,_sender:Option<&AnyObject>){unsafe{mascot::choose_file();}}
@@ -169,6 +210,10 @@ struct State {
     center: (f64, f64),
     pointer: (f64, f64),
     selected: Option<usize>,
+    windows: crate::window_picker::Picker,
+    window_query_pending: bool,
+    window_query_count: usize,
+    window_glass: Option<Retained<NSView>>,
     ring: layout::DockLayout,
     anchor: (f64, f64),
     opened: f64,
@@ -395,6 +440,19 @@ extern "C" fn event_hook(
             s.moved = true;
         }
         if kind == 22 && s.active {
+            if s.settings.show_window_list
+                && s.windows.contains(s.pointer)
+                && platform::CGEventGetIntegerValueField(event, 123) == 0
+            {
+                let lines = platform::CGEventGetIntegerValueField(event, 11);
+                let delta = if lines != 0 {
+                    lines
+                } else {
+                    platform::CGEventGetIntegerValueField(event, 96)
+                } as f64;
+                s.windows.scroll(delta, s.now());
+                s.canvas.setNeedsDisplay(true);
+            }
             suppress = true;
         }
         if s.gesture.held || s.active || !s.effects.is_empty() || s.capture_dirty || s.moved {
@@ -543,6 +601,10 @@ pub fn run() {
             center: (0., 0.),
             pointer: (0., 0.),
             selected: None,
+            windows: crate::window_picker::Picker::default(),
+            window_query_pending: false,
+            window_query_count: 0,
+            window_glass: None,
             ring: layout::DockLayout::new(0, 520., 1470., 956.),
             anchor: (0., 0.),
             opened: 0.,
@@ -666,6 +728,9 @@ impl State {
                     "settings-snapshot" => {
                         self.preferences_snapshot(&dir);
                     }
+                    "wheel-snapshot" => {
+                        let _: () = msg_send![&*self.delegate,performSelector:sel!(wheelSnapshot:),withObject:None::<&AnyObject>,afterDelay:0.0f64];
+                    }
                     "settings-page" => {
                         self.preferences_page(v["page"].as_u64().unwrap_or(0) as usize);
                     }
@@ -710,6 +775,8 @@ impl State {
             }
         }
         let v = serde_json::json!({"preferences":self.preferences_diagnostics(),"input":self.input_report(),"version":env!("CARGO_PKG_VERSION"),"ack":self.diag_ack,"mode":"dock","dock":self.settings.wheel,"dockExact":self.dock_exact,"dockPending":self.dock_pending,"activePaths":self.active_paths,"trusted":self.trusted,"permissionGuides":crate::install::guide_count(),"tap":!self.tap.is_null(),"active":self.active,"capturing":self.capturing,"selected":self.selected,"armed":self.armed,"items":self.active_paths.len(),"nodeCenters":self.ring.nodes.iter().map(|n|[self.center.0+n.angle.cos()*n.radius,self.center.1+n.angle.sin()*n.radius,self.ring.icon]).collect::<Vec<_>>(),"rings":self.ring.nodes.iter().map(|n|n.ring).max().unwrap_or(0)+1,"center":[self.center.0,self.center.1],"softwareOnly":true,"glassCount":self.glasses.iter().filter(|view|!view.isHidden()).count(),"tetherTip":[self.tether.tip().x,self.tether.tip().y],"tetherAlpha":self.tether.alpha(),"tetherSnapped":self.tether.snapped,"emptyBackdrop":true,"notice":self.notice});
+        let mut v = v;
+        v["windowList"] = serde_json::json!({"enabled":self.settings.show_window_list,"queries":self.window_query_count,"pending":self.window_query_pending,"path":self.windows.path,"items":self.windows.items,"selected":self.windows.selected,"explicit":self.windows.explicit,"first":self.windows.first,"frame":self.windows.frame.map(|f|[f.x,f.y,f.w,f.h])});
         let tmp = dir.join("state.tmp");
         let _ = std::fs::write(&tmp, serde_json::to_vec(&v).unwrap());
         let _ = std::fs::rename(tmp, dir.join("state.json"));

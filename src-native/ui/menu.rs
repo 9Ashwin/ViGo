@@ -349,6 +349,13 @@ impl State {
                 self.settings.appearance = ["system", "light", "dark"][(tag - 300) as usize].into();
                 self.save();
             }
+            41 => {
+                self.settings.show_window_list = !self.settings.show_window_list;
+                self.windows.reset();
+                self.sync_window_glass();
+                self.canvas.setNeedsDisplay(true);
+                self.save();
+            }
             _ => {}
         }
     }

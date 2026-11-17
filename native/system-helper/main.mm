@@ -100,6 +100,57 @@ static void activateApplication(NSString *path) {
   output(@{@"ok":@(opened&&!sessionLocked())});
 }
 
+static NSRunningApplication *applicationAtPath(NSString *path) {
+  if(![path.pathExtension.lowercaseString isEqualToString:@"app"])return nil;
+  for(NSRunningApplication *app in NSWorkspace.sharedWorkspace.runningApplications)
+    if([canonical(app.bundleURL.path) isEqualToString:canonical(path)])return app;
+  return nil;
+}
+static void listWindows(NSString *path) {
+  NSMutableArray *items=[NSMutableArray array];NSRunningApplication *app=applicationAtPath(path);
+  if(!app || sessionLocked() || !AXIsProcessTrusted()){output(@{@"items":items});return;}
+  AXUIElementRef root=AXUIElementCreateApplication(app.processIdentifier);AXUIElementSetMessagingTimeout(root,.08);
+  id focused=attribute(root,kAXFocusedWindowAttribute);CGWindowID focusedId=focused?exactWindowId((__bridge AXUIElementRef)focused):0;
+  id windows=attribute(root,kAXWindowsAttribute);
+  if([windows isKindOfClass:NSArray.class])for(id value in windows) {
+    if(items.count>=48)break;
+    AXUIElementRef window=(__bridge AXUIElementRef)value;AXUIElementSetMessagingTimeout(window,.08);
+    CGWindowID wid=exactWindowId(window);if(!wid)continue;
+    NSString *sub=attribute(window,kAXSubroleAttribute);if(sub && ![sub isEqualToString:(__bridge NSString *)kAXStandardWindowSubrole])continue;
+    id title=attribute(window,kAXTitleAttribute);if(![title isKindOfClass:NSString.class] || ![title length])continue;
+    if([title length]>512)title=[title substringToIndex:512];
+    NSDictionary *item=@{@"pid":@(app.processIdentifier),@"id":@(wid),@"title":title,@"minimized":@([attribute(window,kAXMinimizedAttribute) boolValue])};
+    if(wid==focusedId)[items insertObject:item atIndex:0];else[items addObject:item];
+  }
+  CFRelease(root);output(@{@"items":items});
+}
+static void activateWindow(NSString *path,pid_t pid,CGWindowID wid) {
+  NSRunningApplication *app=applicationAtPath(path);
+  if(!app || app.processIdentifier!=pid || !wid || sessionLocked() || !AXIsProcessTrusted()){output(@{@"ok":@NO});return;}
+  AXUIElementRef root=AXUIElementCreateApplication(pid),target=nullptr;AXUIElementSetMessagingTimeout(root,.1);
+  id windows=attribute(root,kAXWindowsAttribute);
+  if([windows isKindOfClass:NSArray.class])for(id value in windows) {
+    AXUIElementRef window=(__bridge AXUIElementRef)value;AXUIElementSetMessagingTimeout(window,.1);
+    if(exactWindowId(window)==wid){target=(AXUIElementRef)CFRetain(window);break;}
+  }
+  if(!target){CFRelease(root);output(@{@"ok":@NO});return;}
+  AXUIElementSetAttributeValue(target,kAXMinimizedAttribute,kCFBooleanFalse);
+  bool front=bringToFront(app);
+  if(front&&!sessionLocked()){
+    AXUIElementSetAttributeValue(target,kAXMainAttribute,kCFBooleanTrue);
+    (void)focusServerWindow(pid,wid);AXUIElementPerformAction(target,kAXRaiseAction);
+    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.06]];
+  }
+  bool selected=false;NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:.6];
+  do {
+    id focused=attribute(root,kAXFocusedWindowAttribute)?:attribute(root,kAXMainWindowAttribute);
+    selected=focused && exactWindowId((__bridge AXUIElementRef)focused)==wid;
+    if(selected || !front || sessionLocked())break;
+    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.03]];
+  } while(deadline.timeIntervalSinceNow>0);
+  CFRelease(target);CFRelease(root);output(@{@"ok":@(front&&selected&&!sessionLocked())});
+}
+
 static void listDock(){
   NSMutableArray *items=[NSMutableArray array];NSMutableSet *seen=[NSMutableSet set];BOOL exact=NO;
   void(^add)(id,NSString*,NSString*)=^(id raw,NSString *name,NSString *kind){
@@ -135,6 +186,8 @@ int main(int argc,char **argv) { @autoreleasepool {
   NSString *command=@(argv[1]);
   if([command isEqualToString:@"dock"])listDock();
   else if([command isEqualToString:@"activate-app"]&&argc==3)activateApplication(@(argv[2]));
+  else if([command isEqualToString:@"windows"]&&argc==3)listWindows(@(argv[2]));
+  else if([command isEqualToString:@"activate-window"]&&argc==5)activateWindow(@(argv[2]),(pid_t)[@(argv[3]) intValue],(CGWindowID)[@(argv[4]) longLongValue]);
   else if([command isEqualToString:@"permissions"])output(@{@"accessibility":@(AXIsProcessTrusted())});
   else{output(@{@"ok":@NO});return 2;}
  }return 0;}

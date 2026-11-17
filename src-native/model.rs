@@ -31,6 +31,7 @@ pub struct Settings {
     pub enabled_on_start: bool,
     pub wheel_size_px: f64,
     pub appearance: String,
+    pub show_window_list: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -47,6 +48,7 @@ impl Default for Settings {
             enabled_on_start: true,
             wheel_size_px: 520.,
             appearance: "system".into(),
+            show_window_list: false,
         }
     }
 }

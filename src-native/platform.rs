@@ -193,11 +193,47 @@ pub fn run(args: &[String], timeout: Duration) -> Result<serde_json::Value, Stri
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 pub enum Message {
-    Dock { items: Vec<DockItem>, exact: bool },
+    Windows {
+        generation: u64,
+        items: Vec<crate::window_picker::Window>,
+    },
+    Dock {
+        items: Vec<DockItem>,
+        exact: bool,
+    },
     Catalog(Vec<DockItem>),
     Mascot(Result<crate::mascot::Asset, String>),
     DockFailed,
     Failure(String),
+}
+pub fn windows(generation: u64, path: String, tx: Sender<Message>) {
+    std::thread::spawn(move || {
+        let items = run(&["windows".into(), path], Duration::from_millis(1500))
+            .ok()
+            .and_then(|v| serde_json::from_value(v["items"].clone()).ok())
+            .unwrap_or_default();
+        let _ = tx.send(Message::Windows { generation, items });
+    });
+}
+pub fn activate_window(path: String, window: crate::window_picker::Window, tx: Sender<Message>) {
+    std::thread::spawn(move || {
+        if !run(
+            &[
+                "activate-window".into(),
+                path,
+                window.pid.to_string(),
+                window.id.to_string(),
+            ],
+            Duration::from_secs(3),
+        )
+        .ok()
+        .is_some_and(|v| v["ok"] == true)
+        {
+            let _ = tx.send(Message::Failure(
+                "窗口已关闭或暂时无法切换，请重新选择".into(),
+            ));
+        }
+    });
 }
 pub fn catalog(tx: Sender<Message>) {
     std::thread::spawn(move || {

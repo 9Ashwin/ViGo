@@ -8,6 +8,7 @@ mod network;
 mod platform;
 mod tether;
 mod ui;
+mod window_picker;
 fn main() -> std::process::ExitCode {
     #[cfg(feature = "diagnostics")]
     {
