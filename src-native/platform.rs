@@ -193,6 +193,7 @@ pub fn run(args: &[String], timeout: Duration) -> Result<serde_json::Value, Stri
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 pub enum Message {
+    PermissionRepair(Result<(), String>),
     Windows {
         generation: u64,
         items: Vec<crate::window_picker::Window>,
@@ -206,9 +207,53 @@ pub enum Message {
     DockFailed,
     Failure(String),
 }
+fn accessibility_reset_args() -> [&'static str; 3] {
+    ["reset", "Accessibility", "com.vigo.desktop"]
+}
+pub fn repair_accessibility(tx: Sender<Message>) {
+    std::thread::spawn(move || {
+        #[cfg(feature = "diagnostics")]
+        if permission_is_simulated() {
+            let _ = tx.send(Message::PermissionRepair(Ok(())));
+            return;
+        }
+        let result = (|| {
+            let mut child = Command::new("/usr/bin/tccutil")
+                .args(accessibility_reset_args())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|_| "无法启动授权修复，请打开系统设置重试".to_string())?;
+            let start = Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        return if status.success() {
+                            Ok(())
+                        } else {
+                            Err(
+                                "系统未能清理 ViGo 的旧授权，请在辅助功能设置中重新添加 ViGo"
+                                    .into(),
+                            )
+                        }
+                    }
+                    Ok(None) if start.elapsed() < Duration::from_secs(4) => {
+                        std::thread::sleep(Duration::from_millis(25))
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err("授权修复超时，请打开辅助功能设置后重试".into());
+                    }
+                }
+            }
+        })();
+        let _ = tx.send(Message::PermissionRepair(result));
+    });
+}
 pub fn windows(generation: u64, path: String, tx: Sender<Message>) {
     std::thread::spawn(move || {
-        let items = run(&["windows".into(), path], Duration::from_millis(1500))
+        let items = run(&["windows".into(), path], Duration::from_millis(2500))
             .ok()
             .and_then(|v| serde_json::from_value(v["items"].clone()).ok())
             .unwrap_or_default();
@@ -223,8 +268,9 @@ pub fn activate_window(path: String, window: crate::window_picker::Window, tx: S
                 path,
                 window.pid.to_string(),
                 window.id.to_string(),
+                window.element.to_string(),
             ],
-            Duration::from_secs(3),
+            Duration::from_secs(6),
         )
         .ok()
         .is_some_and(|v| v["ok"] == true)
@@ -374,10 +420,20 @@ pub fn simulate_permission(trusted: bool) {
 pub fn permission_is_simulated() -> bool {
     PERMISSION_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) >= 0
 }
+#[cfg(not(feature = "diagnostics"))]
+pub fn permission_is_simulated() -> bool {
+    false
+}
 
 #[cfg(test)]
 mod tap_tests {
     use super::*;
+    #[test]
+    fn repair_is_limited_to_this_apps_accessibility_record() {
+        let args = accessibility_reset_args();
+        assert_eq!(args, ["reset", "Accessibility", "com.vigo.desktop"]);
+        assert!(!args.contains(&"All"));
+    }
     #[test]
     fn mouse_only_or_partial_keyboard_taps_do_not_report_keyboard_ready() {
         let mut tap = TapInformation {

@@ -26,10 +26,22 @@ jobs:
           cargo test --locked
           cargo clippy --locked --all-features -- -D warnings
           node tools/native/verify-companion-browser.mjs
+      - name: Import fixed public release identity
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          VIGO_RELEASE_P12_BASE64: ${{ secrets.VIGO_RELEASE_P12_BASE64 }}
+          VIGO_RELEASE_P12_PASSWORD: ${{ secrets.VIGO_RELEASE_P12_PASSWORD }}
+        run: python3 tools/native/signing.py setup
       - name: Build app
         env:
-          VIGO_SIGN_IDENTITY: '-'
+          VIGO_FALLBACK_SIGN_IDENTITY: '-'
         run: sh tools/native/bundle.sh
+      - name: Verify fixed release identity
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: python3 tools/native/signing.py verify release/native/ViGo.app --release
+      - name: Remove temporary signing keychain
+        if: always()
+        run: python3 tools/native/signing.py cleanup
       - name: Build and verify installation DMG
         run: sh tools/native/dmg.sh
       - name: Verify and archive
@@ -38,7 +50,7 @@ jobs:
           test ! -d release/native/ViGo.app/Contents/Frameworks
           ditto -c -k --sequesterRsrc --keepParent release/native/ViGo.app release/ViGo-macOS-arm64-ci.zip
           unzip -t release/ViGo-macOS-arm64-ci.zip
-          echo 'CI testing build: ad-hoc signed, not notarized. Local installed updates use your fixed signing identity.' > release/CI-BUILD-NOTICE.txt
+          python3 -c 'import json,pathlib; p=pathlib.Path("release/native/ViGo.app/Contents/Resources/signing-info.json"); m=json.loads(p.read_text())["mode"]; pathlib.Path("release/CI-BUILD-NOTICE.txt").write_text("Signing: "+m+". Not Apple notarized. Fixed self-signed releases retain the same certificate identity; old ad-hoc installs need one migration authorization.\n")'
           shasum -a 256 release/ViGo-macOS-arm64-ci.zip release/ViGo-macOS-arm64.dmg > release/SHA256SUMS.txt
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

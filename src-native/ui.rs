@@ -1,6 +1,7 @@
 //! All AppKit state stays on the main thread; Dock queries run in isolated workers.
 mod mascot;
 mod menu;
+mod permissions;
 mod preferences;
 mod preferences_drag;
 mod preferences_wheel;
@@ -38,6 +39,9 @@ fn with(f: impl FnOnce(&mut State)) {
             }
         }
     });
+}
+pub(crate) unsafe fn repair_accessibility_permissions() {
+    permissions::repair();
 }
 fn rect(r: Rect) -> NSRect {
     NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.w, r.h))
@@ -168,6 +172,7 @@ define_class!(#[unsafe(super(NSObject))]#[thread_kind=MainThreadOnly]struct Dele
   #[unsafe(method(settingsSize:))]fn settings_size(&self,sender:&NSSlider){with(|s|unsafe{s.settings.wheel_size_px=sender.doubleValue().round();s.save();});}
   #[unsafe(method(settingsAppearance:))]fn settings_appearance(&self,sender:&NSPopUpButton){with(|s|unsafe{s.action(300+sender.indexOfSelectedItem(),sender);});}
   #[unsafe(method(permissionGuide:))]fn permission_guide(&self,_sender:Option<&AnyObject>){unsafe{let mtm=MainThreadMarker::new().unwrap();crate::install::welcome(&NSApplication::sharedApplication(mtm),mtm);}}
+  #[unsafe(method(repairPermissions:))]fn repair_permissions(&self,_sender:Option<&AnyObject>){unsafe{permissions::repair();}}
   #[unsafe(method(action:))]fn action(&self,sender:&AnyObject){let tag:isize=unsafe{msg_send![sender,tag]};with(|s|unsafe{s.action(tag,sender)});}
   #[unsafe(method(tick:))]fn tick(&self,_t:&NSTimer){unsafe{mascot::process_browser_import();}with(|s|unsafe{s.tick()});}
   #[unsafe(method(dockChanged:))]fn dock_changed(&self,n:&NSNotification){let regular=unsafe{n.userInfo().and_then(|d|d.objectForKey(NSWorkspaceApplicationKey)).is_some_and(|a|{let policy:isize=msg_send![&*a,activationPolicy];policy==0})};if regular{with(|s|{s.dock_due=s.now()+0.35;});}}
@@ -213,6 +218,7 @@ struct State {
     windows: crate::window_picker::Picker,
     window_query_pending: bool,
     window_query_count: usize,
+    window_titles: HashMap<(i32, u32), String>,
     window_glass: Option<Retained<NSView>>,
     ring: layout::DockLayout,
     anchor: (f64, f64),
@@ -604,6 +610,7 @@ pub fn run() {
             windows: crate::window_picker::Picker::default(),
             window_query_pending: false,
             window_query_count: 0,
+            window_titles: HashMap::new(),
             window_glass: None,
             ring: layout::DockLayout::new(0, 520., 1470., 956.),
             anchor: (0., 0.),

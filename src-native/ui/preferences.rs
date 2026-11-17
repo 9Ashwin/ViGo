@@ -736,6 +736,9 @@ impl State {
                 .setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
             self.preferences_button(general, "复制诊断信息", r(144., 118., 140., 30.), 23)
                 .setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
+            let repair = self.preferences_button(general, "修复授权…", r(298., 118., 130., 30.), 0);
+            repair.setAction(Some(sel!(repairPermissions:)));
+            repair.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
             card(general, r(0., 12., 660., 88.));
             text(
                 general,

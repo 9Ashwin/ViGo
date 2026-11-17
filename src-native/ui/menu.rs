@@ -351,6 +351,9 @@ impl State {
             }
             41 => {
                 self.settings.show_window_list = !self.settings.show_window_list;
+                if !self.settings.show_window_list {
+                    self.window_titles.clear();
+                }
                 self.windows.reset();
                 self.sync_window_glass();
                 self.canvas.setNeedsDisplay(true);

@@ -28,6 +28,7 @@ try:
     icon = app / 'Contents/Resources' / info['CFBundleIconFile']
     subprocess.run([sys.executable, str(root / 'tools/native/verify-icon.py'), str(icon)], check=True)
     subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
+    subprocess.run([sys.executable, str(root / 'tools/native/signing.py'), 'verify', str(app)], check=True)
     with DSStore.open(str(mount / '.DS_Store'), 'r') as store:
         assert store['ViGo.app']['Iloc'] == (166, 192)
         assert store['应用程序']['Iloc'] == (474, 192)

@@ -12,3 +12,4 @@ native/system-helper/build/
 native/glass/build/
 
 /target/
+__pycache__/

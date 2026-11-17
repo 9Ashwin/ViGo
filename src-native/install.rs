@@ -473,11 +473,21 @@ pub unsafe fn welcome(app: &NSApplication, mtm: MainThreadMarker) {
     }
     #[cfg(feature = "diagnostics")]
     GUIDES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if alert(app,"ViGo 需要辅助功能","ViGo 已安装到“应用程序”。首次使用需要允许全局按键监听和软件切换。点击下方按钮，在系统设置中开启 ViGo；开启后自动生效，无需重启。",&["打开辅助功能","稍后设置"],mtm)==NSAlertFirstButtonReturn {
-        #[cfg(feature="diagnostics")]
-        if platform::permission_is_simulated(){return;}
+    let choice=alert(app,"ViGo 需要辅助功能","首次使用请打开系统设置，为 ViGo 开启辅助功能。若升级后系统开关已经打开，但按 V 仍无反应，可选“修复旧授权”，无需手动删除再添加应用。",&["打开辅助功能","修复旧授权…","稍后设置"],mtm);
+    if choice == NSAlertSecondButtonReturn {
+        crate::ui::repair_accessibility_permissions();
+    }
+    if choice == NSAlertFirstButtonReturn {
+        #[cfg(feature = "diagnostics")]
+        if platform::permission_is_simulated() {
+            return;
+        }
         platform::request_accessibility();
-        if let Some(url)=NSURL::URLWithString(ns_string!("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")){NSWorkspace::sharedWorkspace().openURL(&url);}
+        if let Some(url) = NSURL::URLWithString(ns_string!(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        )) {
+            NSWorkspace::sharedWorkspace().openURL(&url);
+        }
     }
 }
 #[cfg(test)]

@@ -4,12 +4,22 @@ use serde::{Deserialize, Serialize};
 pub const ROW: f64 = 40.;
 pub const HEADER: f64 = 36.;
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Window {
     pub pid: i32,
     pub id: u32,
     pub title: String,
     #[serde(default)]
     pub minimized: bool,
+    #[serde(default)]
+    pub element: u64,
+    #[serde(default)]
+    pub space: String,
+    #[serde(default = "known_title")]
+    pub title_known: bool,
+}
+fn known_title() -> bool {
+    true
 }
 #[derive(Default)]
 pub struct Picker {
@@ -149,6 +159,16 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desktop_identity_survives_transport_without_collapsing_equal_titles() {
+        let items:Vec<Window>=serde_json::from_str(r#"[{"pid":7,"id":1,"title":"GoLand","element":43,"space":"桌面 1","titleKnown":true},{"pid":7,"id":2,"title":"GoLand","element":45,"space":"桌面 2","titleKnown":true}]"#).unwrap();
+        let mut p = Picker::default();
+        p.hover("GoLand", 0.);
+        assert!(p.accept(p.generation, items));
+        assert_ne!(p.items[0].id, p.items[1].id);
+        assert_ne!(p.items[0].space, p.items[1].space);
+        assert_eq!(p.items[1].element, 45);
+    }
     fn windows(n: usize) -> Vec<Window> {
         (0..n)
             .map(|i| Window {
@@ -156,6 +176,9 @@ mod tests {
                 id: i as u32 + 1,
                 title: format!("Project {i}"),
                 minimized: false,
+                element: 0,
+                space: String::new(),
+                title_known: true,
             })
             .collect()
     }

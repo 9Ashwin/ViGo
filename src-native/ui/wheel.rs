@@ -594,11 +594,45 @@ impl State {
         }
         while let Ok(message) = self.rx.try_recv() {
             match message {
-                Message::Windows { generation, items } => {
+                Message::PermissionRepair(result) => {
+                    self.choosing_apps = false;
+                    self.permission_guide_pending = false;
+                    self.notice = match result {
+                        Ok(()) => {
+                            if !platform::permission_is_simulated() {
+                                platform::request_accessibility();
+                                open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+                            }
+                            "旧记录已清理，请在系统设置中为 ViGo 开启一次辅助功能".into()
+                        }
+                        Err(error) => error,
+                    };
+                    self.show_failure();
+                }
+                Message::Windows {
+                    generation,
+                    mut items,
+                } => {
                     self.window_query_pending = false;
                     if self.active && self.settings.show_window_list {
                         if let Some(index) = self.selected {
                             let pose = self.node_pose(index);
+                            if generation == self.windows.generation {
+                                if self.window_titles.len() > 256 {
+                                    self.window_titles.clear();
+                                }
+                                for item in &mut items {
+                                    if item.title_known {
+                                        self.window_titles
+                                            .insert((item.pid, item.id), item.title.clone());
+                                    } else if let Some(title) =
+                                        self.window_titles.get(&(item.pid, item.id))
+                                    {
+                                        item.title = title.clone();
+                                        item.title_known = true;
+                                    }
+                                }
+                            }
                             if (self.pointer.0 - pose.0).hypot(self.pointer.1 - pose.1)
                                 <= pose.2 * 1.4
                                 && self.windows.accept(generation, items)

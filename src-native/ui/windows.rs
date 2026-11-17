@@ -22,10 +22,7 @@ impl State {
             return;
         }
         self.windows.hover(&path, self.now());
-        if !self.window_query_pending
-            && self.running.contains(&path)
-            && (self.gesture.held || self.trial.is_some())
-        {
+        if !self.window_query_pending && (self.gesture.held || self.trial.is_some()) {
             if let Some((generation, path)) = self.windows.request(self.now()) {
                 self.window_query_pending = true;
                 self.window_query_count += 1;
@@ -134,11 +131,14 @@ impl State {
                     &color("selectedContentBackgroundColor").colorWithAlphaComponent(0.18),
                 );
             }
-            let title = if item.minimized {
-                format!("{} · 已最小化", item.title)
-            } else {
-                item.title.clone()
-            };
+            let mut title = item.title.clone();
+            if !item.space.is_empty() {
+                title.push_str(" · ");
+                title.push_str(&item.space);
+            }
+            if item.minimized {
+                title.push_str(" · 已最小化");
+            }
             window_text(
                 &title,
                 r(rect.x + 10., rect.y + 9., rect.w - 32., 22.),
